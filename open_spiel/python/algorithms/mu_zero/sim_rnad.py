@@ -154,6 +154,8 @@ class RNaDSimulataneous():
     
     self.rng_key = jax.random.PRNGKey(self.config.seed)
     
+    if isinstance(game, JaxOriginalGoofspiel):
+      print("Warning: you use Jax Goofspiel, so you need to use domain specific goofspiel_step method")
     # temp_keys = self.get_next_rng_keys(6)
     
     self.example_state  = game.new_initial_state()
@@ -491,8 +493,7 @@ class RNaDSimulataneous():
     params_prev: chex.ArrayTree,
     params_prev_: chex.ArrayTree,
     timestep: TimeStep,
-    alpha,
-    learner_steps
+    alpha: float,
   ):
     
     # We map over trajectory dimension and player dimension
@@ -533,12 +534,11 @@ class RNaDSimulataneous():
     optimizer,
     optimizer_target,
     timestep: TimeStep,
-    alpha,
-    learner_steps,
+    alpha: float,
     update_net, 
   ):
     
-    loss, grad = self._rnad_loss(params, params_target, params_prev, params_prev_, timestep, alpha, learner_steps)
+    loss, grad = self._rnad_loss(params, params_target, params_prev, params_prev_, timestep, alpha)
     
     params = optimizer(params, grad)
     
@@ -571,20 +571,20 @@ class RNaDSimulataneous():
     optimizer_target,
     key: chex.Array,
     alpha,
-    learner_steps,
     update_net, 
   ):
-    trajectory = self.sample_goofspiel_trajectories(self.params, key)
-    self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target = self.update_parameters(
-      self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target, trajectory, alpha, self.learner_steps, update_net)
+    trajectory = self.sample_goofspiel_trajectories(params, key)
+    params, params_target, params_prev, params_prev_, optimizer, optimizer_target = self.update_parameters(
+      params, params_target, params_prev, params_prev_, optimizer, optimizer_target, trajectory, alpha, update_net)
     
-    return self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target
+    return params, params_target, params_prev, params_prev_, optimizer, optimizer_target
     
   def goofspiel_step(self):
     key = self.get_next_rng_key()
     alpha, update_regularization = self._entropy_schedule(self.learner_steps)
+    
     self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target = self.update_goofspiel_parameters(
-      self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target, key, alpha, self.learner_steps, update_regularization)
+      self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target, key, alpha, update_regularization)
     
     self.learner_steps +=1
     
@@ -633,45 +633,31 @@ from open_spiel.python.algorithms.best_response import BestResponsePolicy
 from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
 
 def main():
-  cards = 5
+  cards = 13
   points_order = "descending"
   
   # params = {"num_cards": 5, "num_turns": 3, "first_round": 0}
   
   params = {"num_cards":cards, "points_order": points_order, "imp_info": True}
   
-  game =  pyspiel.load_game("goofspiel", params)
+  # game =  pyspiel.load_game("goofspiel", params)
   
-  # game = JaxOriginalGoofspiel(cards, points_order)
+  game = JaxOriginalGoofspiel(cards, points_order)
    
   mu = True
   if mu == True:
-    muzero = RNaDSimulataneous(game, MuZeroConfig(batch_size=32, trajectory_max=4))
+    muzero = RNaDSimulataneous(game, MuZeroConfig(batch_size=32, trajectory_max=cards-1))
     # muzero.rng_key = jax.random.PRNGKey(42)
   else:
     params = [(n, p) for n, p in params.items()]
-    muzero = RNaDSolver(RNaDConfig(game_name="goofspiel", game_params=params, trajectory_max=4, batch_size=32))
-    muzero._rngkey = jax.random.PRNGKey(42)
+    muzero = RNaDSolver(RNaDConfig(game_name="goofspiel", game_params=params, trajectory_max=cards-1, batch_size=32))
   
   
   profiler = Profiler()
   profiler.start()
-  for _ in range(10000):
-    muzero.step()
-    
-  # policy = muzero.extract_full_policy()
-  
-  # state = game.new_initial_state()
-  # state.apply_actions([0, 1])
-  # print(policy.action_probabilities(state, 0))
-  # print(policy.action_probabilities(state, 1))
-  # print(state.information_state_tensor(0))
-  # print(state.information_state_tensor(1))
-  # # print(exploitability(game, policy))
-  # br1 = BestResponsePolicy(game, 0, policy)
-  # br2 = BestResponsePolicy(game, 1, policy)
-  # print(br1.value(game.new_initial_state()))
-  # print(br2.value(game.new_initial_state()))
+  for _ in range(4000):
+    muzero.goofspiel_step()
+     
   
     
   profiler.stop()
