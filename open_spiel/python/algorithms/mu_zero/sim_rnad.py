@@ -429,7 +429,7 @@ class RNaDSimulataneous():
     inverted_sampling = _policy_ratio(jnp.ones_like(sampling_policy), sampling_policy, action_oh, valid)
     
     regularization_entropy = eta * jnp.sum(network_policy * regularization_term, axis=-1)
-    weighted_regularization_term = -eta * regularization_term + regularization_entropy[..., (1, 0), jnp.newaxis]
+    weighted_regularization_term = -eta * regularization_term# + regularization_entropy[..., (1, 0), jnp.newaxis]
     
     both_player_entropy = (regularization_entropy[..., 1] - regularization_entropy[..., 0])
     
@@ -556,7 +556,7 @@ class RNaDSimulataneous():
     alpha, update_regularization = self._entropy_schedule(self.learner_steps)
     
     self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target = self.update_parameters(
-      self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target, trajectory, alpha, self.learner_steps, update_regularization)
+      self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target, trajectory, alpha, update_regularization)
     
     self.learner_steps += 1
     
@@ -575,7 +575,7 @@ class RNaDSimulataneous():
   ):
     trajectory = self.sample_goofspiel_trajectories(params, key)
     params, params_target, params_prev, params_prev_, optimizer, optimizer_target = self.update_parameters(
-      params, params_target, params_prev, params_prev_, optimizer, optimizer_target, trajectory, alpha, update_net)
+      params, params_target, params_prev, params_prev_, optimizer, optimizer_target, lax.stop_gradient(trajectory), alpha, update_net)
     
     return params, params_target, params_prev, params_prev_, optimizer, optimizer_target
     
@@ -623,6 +623,44 @@ class RNaDSimulataneous():
   
     return policy
   
+  def extract_goofspiel_policy(self, game):
+    assert isinstance(self.game, JaxOriginalGoofspiel)
+    iset_set = []
+    isets, legals = [], []
+    def _traverse_tree(state: pyspiel.State, info):
+      if state.is_terminal():
+        return
+      p1_iset = state.information_state_string(0)
+      p2_iset = state.information_state_string(1)
+      _, p1_goof_iset, p2_goof_iset, _ = self.game.get_info(info[0], info[1], info[2])
+      if not p1_iset in iset_set:
+        iset_set.append(p1_iset)
+        isets.append(p1_goof_iset) 
+        legals.append(info[3][0])
+      if not p2_iset in iset_set:
+        iset_set.append(p2_iset)
+        isets.append(p2_goof_iset)
+        legals.append(info[3][1])
+      for a1 in state.legal_actions(0):
+        for a2 in state.legal_actions(1):
+          new_state = state.clone()
+          new_state.apply_actions([a1, a2])
+          new_legals, new_rewards, new_point_cards, new_played_cards, new_p1_points = self.game.apply_action(info[0], info[1], info[2], info[4], np.array([a1, a2]))
+          _traverse_tree(new_state, (new_point_cards, new_played_cards, new_p1_points, new_legals, info[4]+1))
+          
+    init_info = self.game.initialize_structures()
+    init_info = (*init_info, 0)
+    _traverse_tree(game.new_initial_state(), init_info)
+    isets = np.array(isets, dtype=np.float32)
+    legals = np.array(legals, dtype=np.int8)
+    pi = self._jit_get_policy(self.params_target, isets, legals)
+    policy = TabularPolicy(game)
+    # policy.
+    for i, iset in enumerate(iset_set):
+      policy.action_probability_array[policy.state_lookup[iset]] = pi[i]
+  
+    return policy
+  
   
   
   
@@ -633,16 +671,18 @@ from open_spiel.python.algorithms.best_response import BestResponsePolicy
 from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
 
 def main():
-  cards = 13
+  cards = 5
   points_order = "descending"
   
   # params = {"num_cards": 5, "num_turns": 3, "first_round": 0}
   
   params = {"num_cards":cards, "points_order": points_order, "imp_info": True}
   
-  # game =  pyspiel.load_game("goofspiel", params)
+  orig_game =  pyspiel.load_game("goofspiel", params)
   
   game = JaxOriginalGoofspiel(cards, points_order)
+  
+  # game = orig_game
    
   mu = True
   if mu == True:
@@ -653,15 +693,29 @@ def main():
     muzero = RNaDSolver(RNaDConfig(game_name="goofspiel", game_params=params, trajectory_max=cards-1, batch_size=32))
   
   
-  profiler = Profiler()
-  profiler.start()
-  for _ in range(4000):
+  # profiler = Profiler()
+  # profiler.start()
+  for _ in range(100000):
     muzero.goofspiel_step()
      
   
+  # profiler.stop()
+  # print(profiler.output_text(color=True, unicode=True))
+  
+  # policy = muzero.extract_full_policy()
     
-  profiler.stop()
-  print(profiler.output_text(color=True, unicode=True))
+  policy = muzero.extract_goofspiel_policy(orig_game)
+  
+  # print(policy.action_probabilities(state, 0))
+  # print(policy.action_probabilities(state, 1))
+  # print(state.information_state_tensor(0))
+  # print(state.information_state_tensor(1))
+  # # print(exploitability(game, policy))
+  br1 = BestResponsePolicy(orig_game, 0, policy)
+  br2 = BestResponsePolicy(orig_game, 1, policy)
+  print(br1.value(orig_game.new_initial_state()))
+  print(br2.value(orig_game.new_initial_state()))
+  
   # traj = muzero.sample_trajectories()
   # print(traj.action.shape)
   
