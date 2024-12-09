@@ -337,7 +337,6 @@ class RNaDSimulataneous():
     key = jax.random.split(key, (self.config.trajectory_max, self.config.batch_size, 2))
     # turns = list(range(self.game.cards -1))
     cards = self.game.cards
-    
     @chex.dataclass(frozen=True)
     class SampleTrajectoryCarry:
       point_cards: chex.Array
@@ -356,7 +355,7 @@ class RNaDSimulataneous():
     vectorized_get_info = jax.vmap(self.game.get_info, in_axes=(0, 0, 0), out_axes=(0, 0, 0, 0))
     vectorized_apply_action = jax.vmap(self.game.apply_action, in_axes=(0, 0, 0, None, 0), out_axes=(0, 0, 0, 0, 0))
     vectorized_sample_action = jax.vmap(jax.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0), in_axes=(0, 0), out_axes=0)
-    network_apply = jax.vmap(self._jit_get_policy, in_axes=(None, 1, 1), out_axes=1)
+    network_apply = jax.vmap(self._jit_get_policy, in_axes=(None, 0, 0), out_axes=0)
     
     init_carry = SampleTrajectoryCarry(
       point_cards=point_cards,
@@ -436,7 +435,11 @@ class RNaDSimulataneous():
     entropy_reward = reward + both_player_entropy
     entropy_reward = jnp.expand_dims(jnp.stack((entropy_reward, -entropy_reward), axis=-1), -1)
     
-    reward = jnp.expand_dims(jnp.stack((reward, -reward), axis=-1), -1)
+    
+    q_reward = jnp.stack((reward, -reward), axis=-1) + regularization_entropy[..., (1, 0)]
+    
+    q_reward = jnp.expand_dims(q_reward, -1)
+    
     
     
     @chex.dataclass(frozen=True)
@@ -451,7 +454,7 @@ class RNaDSimulataneous():
     )
   
     def _v_trace(carry: VTraceCarry, x) -> tuple[VTraceCarry, Any]:
-      (importance_sampling, v, reward, entropy_reward, weighted_regularization_term, valid, inverted_sampling, action_oh) = x 
+      (importance_sampling, v, q_reward, entropy_reward, weighted_regularization_term, valid, inverted_sampling, action_oh) = x 
       # reward_uncorrected = reward + gamma * carry.reward_uncorrected + entropy
       # discounted_reward = reward + gamma * carry.reward
       
@@ -461,7 +464,7 @@ class RNaDSimulataneous():
       v_target = v + carry_delta_v
       
       # TODO: Shall we use opponent entropy reg term or entropy of played action?
-      q_value = v + weighted_regularization_term  + action_oh * inverted_sampling  *(reward + gamma * importance_sampling * (carry.next_value + carry.delta_v) - v )
+      q_value = v + weighted_regularization_term  + action_oh * inverted_sampling  *(q_reward + gamma * importance_sampling * (carry.next_value + carry.delta_v) - v )
       
       next_carry = VTraceCarry(
         next_value=v,
@@ -481,7 +484,7 @@ class RNaDSimulataneous():
     _, (v_target, q_value) = lax.scan(
       f=_v_trace,
       init=init_carry,
-      xs=(importance_sampling, v, reward, entropy_reward, weighted_regularization_term, valid, inverted_sampling, action_oh),
+      xs=(importance_sampling, v, q_reward, entropy_reward, weighted_regularization_term, valid, inverted_sampling, action_oh),
       reverse=True
     ) 
     return v_target, q_value
@@ -585,7 +588,7 @@ class RNaDSimulataneous():
     
     self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target = self.update_goofspiel_parameters(
       self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target, key, alpha, update_regularization)
-    
+
     self.learner_steps +=1
     
     

@@ -22,6 +22,9 @@ class JaxOriginalGoofspiel:
   def information_state_tensor_shape(self):
     return self.turns * self.cards + self.turns * 2 + self.turns * self.cards * 2 + 2
   
+  def public_state_tensor_shape(self):
+    return self.turns * self.cards + self.turns * 2 + self.turns * self.cards
+  
   def initialize_structures(self):
     if self.points_order == "descending":
       point_cards = np.arange(self.cards, self.cards - self.turns, -1)
@@ -29,7 +32,7 @@ class JaxOriginalGoofspiel:
       point_cards = np.arange(1, 1 + self.cards - self.turns)
     played_cards = np.zeros((2, self.turns, self.cards))
     p1_points = np.zeros(self.turns)
-    return point_cards, played_cards, p1_points, 0
+    return point_cards, played_cards, p1_points, np.ones((2, self.cards))
   
   @functools.partial(jax.jit, static_argnums=(0, 1))
   def initialize_batch_structures(self, batch):
@@ -42,7 +45,7 @@ class JaxOriginalGoofspiel:
     return point_cards, played_cards, p1_points, jnp.ones((batch, 2, self.cards))
   
   # State Tensor -> Point card [Turn, Card], Winner [Turn, Player], Tie Cards [Turn, Card], Played Cards [Player, Turn, Card], 
-  # Iset tensor -> Point card [Turn, Card], Winner [Turn, Player], Tie Cards [Turn, Card], Played Cards [Turn, Card],
+  # Iset tensor -> Observing Player, Point card [Turn, Card], Winner [Turn, Player], Tie Cards [Turn, Card], Played Cards [Turn, Card],
   # Public tensor -> Point card [Turn, Card], Winner [Turn, Player], Tie Cards [Turn, Card]
   @functools.partial(jax.jit, static_argnums=(0,))
   def get_info(self, point_cards, played_cards, p1_points):
@@ -71,7 +74,7 @@ class JaxOriginalGoofspiel:
     
     return state_tensor, p1_iset_tensor, p2_iset_tensor, public_state_tensor
   
-  @functools.partial(jax.jit, static_argnums=(0,4))
+  @functools.partial(jax.jit, static_argnums=(0,))
   def apply_action(self, point_cards, played_cards, p1_points, turn, actions):
     # This is not working
     # turn = jnp.argmax(jnp.arange(self.turns) * jnp.sum(played_cards[0], -1))
@@ -101,7 +104,7 @@ class JaxOriginalGoofspiel:
     
     p1_points = jnp.where(turn != self.cards - 2, p1_points, jnp.where(next_tie, p1_points, jnp.where(next_winner == 0, p1_points + next_point, p1_points - next_point)))
     
-    rewards = jnp.where(turn != self.cards - 2, 0, jnp.sum(p1_points))
+    rewards = jnp.where(turn != self.cards - 2, 0, jnp.clip(jnp.sum(p1_points), -1, 1) )
     
     # rewards = jnp.sum(p1_points)
     # if turn == self.cards-1:
