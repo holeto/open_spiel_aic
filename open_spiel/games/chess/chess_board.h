@@ -231,7 +231,7 @@ inline const std::string kDefaultStandardFEN =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 inline const std::string kDefaultSmallFEN = "r1kr/pppp/PPPP/R1KR w - - 0 1";
 
-using ObservationTable = std::array<bool, k2dMaxBoardSize>;
+using ObservationTable = std::vector<bool>;
 
 // Specifies policy for pseudo legal moves generation.
 enum PseudoLegalMoveSettings {
