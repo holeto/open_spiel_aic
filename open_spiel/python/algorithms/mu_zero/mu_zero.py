@@ -67,8 +67,10 @@ class DynamicsNetwork(nn.Module):
     
     next_p1_iset = nn.Dense(self.abstraction_size)(x)
     next_p2_iset = nn.Dense(self.abstraction_size)(x)
+    reward = nn.Dense(2)(x)
+    is_terminal = nn.Dense(1)(x)
     
-    return next_p1_iset, next_p2_iset
+    return next_p1_iset, next_p2_iset, reward, is_terminal
  
 class InfosetEncoder(nn.Module):
   hidden_size: int
@@ -95,7 +97,7 @@ class PublicStateEncoder(nn.Module):
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
     ps = nn.Dense(self.iset_size * self.isets)(x)
-    ps = ps.reshape((-1, self.isets, self.iset_size))
+    ps = jnp.squeeze(ps.reshape((-1, self.isets, self.iset_size)))
     return ps
 
 
@@ -315,6 +317,34 @@ class MuZero():
     iset_choice = jnp.argmax(iset_probs, axis=-1)
     legal = self.legal_actions_network.apply(legal_params, isets[jnp.arange(public_state.shape[0]), iset_choice])
     return legal
+    
+  @functools.partial(jax.jit, static_argnums=(0,))
+  def _jit_get_next_state(self, params, p1_iset, p2_iset, p1_action, p2_action):
+    p1_action = jax.nn.one_hot(p1_action, self.actions)
+    p2_action = jax.nn.one_hot(p2_action, self.actions)
+    return self.dynamics_network.apply(params, p1_iset, p2_iset, p1_action, p2_action)
+  
+  @functools.partial(jax.jit, static_argnums=(0,))
+  def _jit_get_abstraction(self,abstraction_params,  iset_params, public_state, obs):
+    abstraction = self.abstraction_network.apply(abstraction_params, public_state)
+    iset = self.iset_encoder.apply(iset_params, obs)
+    picked_iset = jnp.argmax(iset, axis=-1, keepdims=True)
+    return jnp.squeeze(jnp.take_along_axis(abstraction, picked_iset[..., jnp.newaxis], axis=-2))
+  
+  def get_abstraction(self, public_state, obs, pl):
+    if pl == 0:
+      return self._jit_get_abstraction(self.p1_abstraction_params, self.p1_iset_encoder_params, public_state, obs)
+    else:
+      return self._jit_get_abstraction(self.p2_abstraction_params, self.p2_iset_encoder_params, public_state, obs)
+  
+  def get_both_abstraction(self, public_state, p1_iset, p2_iset):
+    p1_abstraction_iset = self._jit_get_abstraction(self.p1_abstraction_params, self.p1_iset_encoder_params, public_state, p1_iset)
+    p2_abstraction_iset = self._jit_get_abstraction(self.p2_abstraction_params, self.p2_iset_encoder_params, public_state, p2_iset)
+    return p1_abstraction_iset, p2_abstraction_iset
+  
+  def get_next_state(self, public_state, p1_iset, p2_iset, p1_action, p2_action):
+    p1_abstraction_iset, p2_abstraction_iset = self.get_both_abstraction(public_state, p1_iset, p2_iset)
+    return self._jit_get_next_state(self.dynamics_params, p1_abstraction_iset, p2_abstraction_iset, p1_action, p2_action) 
     
   def get_legal_actions(self, public_state, obs, pl):
     if pl == 0:
@@ -660,27 +690,37 @@ class MuZero():
     p2_current_iset = jnp.squeeze(jnp.take_along_axis(p2_abstraction, jnp.argmax(p2_iset_probs, axis=-1, keepdims=True)[..., None], axis=-2))
     
     
+  
     valid = lax.pad(timestep.valid, 0.0, [(0, 1, 0), (0, 0, 0)])[1:]
+    reward = jnp.stack((timestep.reward, -timestep.reward), axis=-1)
     
-    vectorized_dynamics = jax.vmap(self.dynamics_network.apply, in_axes=(None, 0, 0, 0, 0), out_axes=(0, 0))
+    vectorized_dynamics = jax.vmap(self.dynamics_network.apply, in_axes=(None, 0, 0, 0, 0), out_axes=(0, 0, 0, 0))
     
     
-    next_p1_iset, next_p2_iset = vectorized_dynamics(dynamics_params, lax.stop_gradient(p1_current_iset), lax.stop_gradient(p2_current_iset), lax.stop_gradient(timestep.action[..., 0, :]), lax.stop_gradient(timestep.action[..., 1, :])) 
+    next_p1_iset, next_p2_iset, next_reward, is_terminal = vectorized_dynamics(dynamics_params, lax.stop_gradient(p1_current_iset), lax.stop_gradient(p2_current_iset), lax.stop_gradient(timestep.action[..., 0, :]), lax.stop_gradient(timestep.action[..., 1, :])) 
     
     next_state = jnp.stack((next_p1_iset, next_p2_iset), axis=-2)
     real_next_state = jnp.stack((p1_current_iset, p2_current_iset), axis=-2)
+    
+  
     
     real_next_state = jnp.roll(real_next_state, shift=-1, axis=0)
     
     
     normalization = jnp.sum(valid)
     
-    loss = (lax.stop_gradient(real_next_state) - next_state)
-    loss = jnp.sum(loss ** 2) / (normalization + (normalization == 0))
-    return loss
+    dynamics_loss = (lax.stop_gradient(real_next_state) - next_state)
+    dynamics_loss = jnp.sum(dynamics_loss ** 2) / (normalization + (normalization == 0))
+    
+    reward_loss = jnp.sum((reward - next_reward) ** 2) / (normalization + (normalization == 0))
+    
+    terminal_loss = optax.sigmoid_binary_cross_entropy(is_terminal[..., None],  1 - valid)
+    terminal_loss = jnp.sum(terminal_loss) / (normalization + (normalization == 0))
+    
+    return dynamics_loss + reward_loss + terminal_loss
    
       
-  # @functools.partial(jax.jit, static_argnums=(0,))
+  @functools.partial(jax.jit, static_argnums=(0,))
   def update_parameters(
     self,
     params: chex.ArrayTree,
@@ -702,14 +742,14 @@ class MuZero():
     update_net, 
   ):
     
-    # loss, grad = self._rnad_loss(params, params_target, params_prev, params_prev_, timestep, alpha)
+    loss, grad = self._rnad_loss(params, params_target, params_prev, params_prev_, timestep, alpha)
     
     
     
-    # params = optimizer(params, grad)
+    params = optimizer(params, grad)
     
-    # params_target = optimizer_target(
-    #     params_target, jax.tree.map(lambda a, b: a - b, params_target, params))
+    params_target = optimizer_target(
+        params_target, jax.tree.map(lambda a, b: a - b, params_target, params))
     
     
     vectorized_net_apply = jax.vmap(jax.vmap(self.rnad_network.apply, in_axes=(None, 0, 0), out_axes=0), in_axes=(None, 1, 1), out_axes=1)
@@ -733,18 +773,49 @@ class MuZero():
         update_net,
         lambda: (params_target, params_prev),
         lambda: (params_prev, params_prev_))
-    return params, params_target, params_prev, params_prev_, abstraction_params, iset_encoder_params, similarity_params, dynamics_params, optimizer, optimizer_target, abstraction_optimizer, iset_encoder_optimizer, dynamics_optimizer, similarity_optimizer
+    return params, params_target, params_prev, params_prev_, abstraction_params, iset_encoder_params, similarity_params, dynamics_params, optimizer, optimizer_target, abstraction_optimizer, iset_encoder_optimizer, similarity_optimizer, dynamics_optimizer
   
   def step(self):
     trajectory = self.sample_trajectories()
     alpha, update_regularization = self._entropy_schedule(self.learner_steps)
     
+    (self.params, 
+     self.params_target, 
+     self.params_prev, 
+     self.params_prev_, 
+     (self.p1_abstraction_params, self.p2_abstraction_params),
+     (self.p1_iset_encoder_params, self.p2_iset_encoder_params),
+     (self.p1_similarity_params, self.p2_similarity_params),
+     self.dynamics_params, 
+     self.optimizer, 
+     self.optimizer_target,
+     (self.p1_abstraction_optimizer, self.p2_abstraction_optimizer),
+     (self.p1_iset_encoder_optimizer, self.p2_iset_encoder_optimizer),
+     (self.p1_similarity_optimizer, self.p2_similarity_optimizer),
+     self.dynamics_optimizer) = self.update_parameters(
+      self.params, 
+      self.params_target, 
+      self.params_prev, 
+      self.params_prev_, 
+      (self.p1_abstraction_params, self.p2_abstraction_params),
+      (self.p1_iset_encoder_params, self.p2_iset_encoder_params),
+     (self.p1_similarity_params, self.p2_similarity_params),
+      self.dynamics_params, 
+      self.optimizer, 
+      self.optimizer_target, 
+      (self.p1_abstraction_optimizer, self.p2_abstraction_optimizer),
+      (self.p1_iset_encoder_optimizer, self.p2_iset_encoder_optimizer),
+     (self.p1_similarity_optimizer, self.p2_similarity_optimizer),
+      self.dynamics_optimizer,
+      alpha, 
+      update_regularization)
+     
     self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target = self.update_parameters(
       self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target, trajectory, alpha, update_regularization)
     
     self.learner_steps += 1
     
-  # @functools.partial(jax.jit, static_argnums=(0,))
+  @functools.partial(jax.jit, static_argnums=(0,))
   def update_goofspiel_parameters(
     self,
     params: chex.ArrayTree,
@@ -880,7 +951,8 @@ class MuZero():
       policy.action_probability_array[policy.state_lookup[iset]] = pi[i]
   
     return policy
-  
+
+
 def compare_legals(muzero, game):
 
   init_info = game.initialize_structures()
@@ -935,7 +1007,41 @@ def compare_legals(muzero, game):
   print(p1_incorrect)
   print(p2_incorrect)
   
+def goofspiel_compare_learned_trees(muzero, jax_game, orig_game):
 
+  init_info = jax_game.initialize_structures()
+  init_state = orig_game.new_initial_state()
+  
+  def _traverse_tree(info, state):
+    if state.is_terminal():
+      return
+    _, p1_goof_iset, p2_goof_iset, public_state = jax_game.get_info(info[0], info[1], info[2])
+    for a1 in state.legal_actions(0):
+      for a2 in state.legal_actions(1):
+        new_state = state.clone()
+        new_state.apply_actions([a1, a2])
+        new_legals, new_rewards, new_point_cards, new_played_cards, new_p1_points = jax_game.apply_action(info[0], info[1], info[2], info[4], np.array([a1, a2]))
+        _, next_p1_goof_iset, next_p2_goof_iset, next_public_state = jax_game.get_info(new_point_cards, new_played_cards, new_p1_points)
+        predicted_p1_iset, predicted_p2_iset, predicted_reward, predicted_terminal = muzero.get_next_state(public_state, p1_goof_iset, p2_goof_iset, a1, a2)
+        abstracted_p1_iset, abstracted_p2_iset = muzero.get_both_abstraction(next_public_state, next_p1_goof_iset, next_p2_goof_iset)
+        
+        print(predicted_p1_iset)
+        print(abstracted_p1_iset)
+        print(jnp.linalg.norm(predicted_p1_iset - abstracted_p1_iset))
+        print(predicted_p2_iset)
+        print(abstracted_p2_iset)
+        print(jnp.norm(predicted_p2_iset - abstracted_p2_iset))
+        print(predicted_reward)
+        print(new_rewards)
+        print(new_state.is_terminal())
+        print(predicted_terminal)
+        
+        
+        _traverse_tree((new_point_cards, new_played_cards, new_p1_points, new_legals, info[4]+1), new_state)
+  
+  
+  init_info = (*init_info, 0)
+  _traverse_tree(init_info, init_state)
   
   
 from open_spiel.python.algorithms.best_response import BestResponsePolicy
@@ -966,10 +1072,12 @@ def main():
   
   # profiler = Profiler()
   # profiler.start()
-  for _ in range(50000):
+  for _ in range(20000):
     muzero.goofspiel_step()
      
-  compare_legals(muzero, game)
+  goofspiel_compare_learned_trees(muzero, game, orig_game)
+  # print("Ee")
+  # compare_legals(muzero, game)
   # profiler.stop()
   # print(profiler.output_text(color=True, unicode=True))
   
