@@ -215,6 +215,8 @@ class MuZero():
     self.iset_encoder = InfosetEncoder(self.config.iset_hidden_size, self.config.abstraction_amount)
     
     self.similarity_network = SimilarityNetwork(self.config.iset_hidden_size, self.actions)
+    
+    # self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.example_timestep.obs.shape[-1])
     self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.config.abstraction_size)
     
     self._rnad_loss = jax.value_and_grad(self.rnad_loss, has_aux=False)
@@ -222,6 +224,8 @@ class MuZero():
     self._abstraction_loss = jax.value_and_grad(self.abstraction_loss, argnums=[0,1,2], has_aux=False)
     
     self._dynamics_loss = jax.value_and_grad(self.dynamics_loss, has_aux=False)
+    # self._dynamics_loss = jax.value_and_grad(self.non_abstracted_dynamics_loss, has_aux=False)
+    # self._non_abstracted_dynamics_loss = jax.value_and_grad(self.non_abstracted_dynamics_loss, has_aux=False)
     
     temp_key = self.get_next_rng_key()
     self.params = self.rnad_network.init(temp_key, self.example_timestep.obs, self.example_timestep.legal)
@@ -244,6 +248,7 @@ class MuZero():
     self.p1_similarity_params = self.similarity_network.init(temp_keys[4], np.ones((1, self.config.abstraction_size)))
     self.p2_similarity_params = self.similarity_network.init(temp_keys[5], np.ones((1, self.config.abstraction_size)))
     
+    # self.dynamics_params = self.dynamics_network.init(temp_keys[6], self.example_timestep.obs, self.example_timestep.obs, self.example_timestep.action, self.example_timestep.action)
     self.dynamics_params = self.dynamics_network.init(temp_keys[6], np.ones((1, self.config.abstraction_size)), np.ones((1, self.config.abstraction_size)), self.example_timestep.action, self.example_timestep.action)
     
     self.p1_abstraction_optimizer = optax_optimizer(self.p1_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
@@ -676,6 +681,32 @@ class MuZero():
     
     return _compute_soft_kmeans_loss(pi_v, jnp.concatenate(similarity, -1), iset_probs) 
     
+  def non_abstracted_dynamics_loss(self, dynamics_params, timestep: TimeStep):
+    vectorized_dynamics = jax.vmap(self.dynamics_network.apply, in_axes=(None, 0, 0, 0, 0), out_axes=(0, 0, 0, 0))
+    
+    next_p1_iset, next_p2_iset, next_reward, is_terminal = vectorized_dynamics(dynamics_params, timestep.obs[..., 0, :], timestep.obs[..., 1, :], timestep.action[..., 0, :], timestep.action[..., 1, :]) 
+    
+    merged_state = jnp.stack((timestep.obs[..., 0, :], timestep.obs[..., 1, :]), axis=-2)
+    next_real_state = jnp.roll(merged_state, shift=-1, axis=0)
+    next_state = jnp.stack((next_p1_iset, next_p2_iset), axis=-2)
+    
+    valid = lax.pad(timestep.valid, 0.0, [(0, 1, 0), (0, 0, 0)])[1:]
+    reward = jnp.stack((timestep.reward, -timestep.reward), axis=-1)
+    
+    dynamics_normalization = jnp.sum(valid)
+    normalization = jnp.sum(timestep.valid)
+    
+    dynamics_loss = (lax.stop_gradient(next_real_state) - next_state) * valid[..., None, None]
+    dynamics_loss = jnp.sum(dynamics_loss ** 2) / (dynamics_normalization + (dynamics_normalization == 0))
+    
+    reward_loss = ((lax.stop_gradient(reward) - next_reward) ** 2) * timestep.valid[..., None]
+    reward_loss = jnp.sum(reward_loss) / (normalization + (normalization == 0))
+    
+    terminal_loss = optax.sigmoid_binary_cross_entropy(jnp.squeeze(is_terminal),  lax.stop_gradient(1 - valid)) * timestep.valid
+    terminal_loss = jnp.sum(terminal_loss) / (normalization + (normalization == 0))
+    
+    return dynamics_loss + reward_loss + terminal_loss
+    
   def dynamics_loss(self, dynamics_params, abstraction_params, iset_encoder_params, timestep: TimeStep):
     vectorized_abstraction = jax.vmap(self.abstraction_network.apply, in_axes=(None, 0), out_axes=0)
     vectorized_iset_encoder = jax.vmap(self.iset_encoder.apply, in_axes=(None, 0), out_axes=0)  
@@ -697,12 +728,10 @@ class MuZero():
     vectorized_dynamics = jax.vmap(self.dynamics_network.apply, in_axes=(None, 0, 0, 0, 0), out_axes=(0, 0, 0, 0))
     
     
-    next_p1_iset, next_p2_iset, next_reward, is_terminal = vectorized_dynamics(dynamics_params, lax.stop_gradient(p1_current_iset), lax.stop_gradient(p2_current_iset), lax.stop_gradient(timestep.action[..., 0, :]), lax.stop_gradient(timestep.action[..., 1, :])) 
+    next_p1_iset, next_p2_iset, next_reward, is_terminal = vectorized_dynamics(dynamics_params, p1_current_iset, p2_current_iset, timestep.action[..., 0, :], timestep.action[..., 1, :]) 
     
     next_state = jnp.stack((next_p1_iset, next_p2_iset), axis=-2)
     real_next_state = jnp.stack((p1_current_iset, p2_current_iset), axis=-2)
-    
-  
     
     real_next_state = jnp.roll(real_next_state, shift=-1, axis=0)
     
@@ -713,10 +742,10 @@ class MuZero():
     dynamics_loss = (lax.stop_gradient(real_next_state) - next_state) * valid[..., None, None]
     dynamics_loss = jnp.sum(dynamics_loss ** 2) / (dynamics_normalization + (dynamics_normalization == 0))
     
-    reward_loss = ((reward - next_reward) ** 2) * timestep.valid[..., None]
+    reward_loss = ((lax.stop_gradient(reward) - next_reward) ** 2) * timestep.valid[..., None]
     reward_loss = jnp.sum(reward_loss) / (normalization + (normalization == 0))
     
-    terminal_loss = optax.sigmoid_binary_cross_entropy(jnp.squeeze(is_terminal),  1 - valid) * timestep.valid
+    terminal_loss = optax.sigmoid_binary_cross_entropy(jnp.squeeze(is_terminal),  lax.stop_gradient(1 - valid)) * timestep.valid
     terminal_loss = jnp.sum(terminal_loss) / (normalization + (normalization == 0))
     
     return dynamics_loss + reward_loss + terminal_loss
@@ -761,11 +790,16 @@ class MuZero():
     abs_grad = []
     for pl in range(2):
       abstraction_loss, abstraction_grad = self._abstraction_loss(abstraction_params[pl], iset_encoder_params[pl], similarity_params[pl], jax.lax.stop_gradient(pi_v[..., pl, :]), timestep.public_state, timestep.obs[..., pl, :])
+      
+      # abstraction_loss, abstraction_grad = self._abstraction_loss(abstraction_params[pl], iset_encoder_params[pl], similarity_params[pl], jnp.concatenate([timestep.legal[..., 0, :], jnp.zeros_like(jnp.squeeze(v)[..., :1])], -1), timestep.public_state, timestep.obs[..., pl, :])
       abs_grad.append(abstraction_grad)
     
     abstraction_params = (*[abstraction_optimizer[pl](abstraction_params[pl], abs_grad[pl][0]) for pl in range(2)],)
     iset_encoder_params = (*[iset_encoder_optimizer[pl](iset_encoder_params[pl], abs_grad[pl][1]) for pl in range(2)],)
     similarity_params = (*[similarity_optimizer[pl](similarity_params[pl], abs_grad[pl][2]) for pl in range(2)],)
+    
+    
+    # dynamics_loss, dynamics_grad = self._dynamics_loss(dynamics_params, timestep)
     
     dynamics_loss, dynamics_grad = self._dynamics_loss(dynamics_params, abstraction_params, iset_encoder_params, timestep)
     
@@ -1023,8 +1057,13 @@ def goofspiel_compare_learned_trees(muzero, jax_game, orig_game):
         new_state = state.clone()
         new_state.apply_actions([a1, a2])
         new_legals, new_rewards, new_point_cards, new_played_cards, new_p1_points = jax_game.apply_action(info[0], info[1], info[2], info[4], np.array([a1, a2]))
+        
         _, next_p1_goof_iset, next_p2_goof_iset, next_public_state = jax_game.get_info(new_point_cards, new_played_cards, new_p1_points)
+        
         predicted_p1_iset, predicted_p2_iset, predicted_reward, predicted_terminal = muzero.get_next_state(public_state, p1_goof_iset, p2_goof_iset, a1, a2)
+        
+        # predicted_p1_iset, predicted_p2_iset, predicted_reward, predicted_terminal = muzero._jit_get_next_state(muzero.dynamics_params, p1_goof_iset, p2_goof_iset, a1, a2)
+        
         abstracted_p1_iset, abstracted_p2_iset = muzero.get_both_abstraction(next_public_state, next_p1_goof_iset, next_p2_goof_iset)
         
         print(predicted_p1_iset)
@@ -1074,7 +1113,7 @@ def main():
   
   # profiler = Profiler()
   # profiler.start()
-  for _ in range(40000):
+  for _ in range(10000):
     muzero.goofspiel_step()
      
   goofspiel_compare_learned_trees(muzero, game, orig_game)
