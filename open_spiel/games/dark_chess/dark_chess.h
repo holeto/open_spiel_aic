@@ -102,25 +102,9 @@ class DarkChessState : public State {
     return moves_history_;
   }
 
-  std::vector<int> LastSeenPiece(chess::Color color, chess::PieceType piece_type) const {
+  std::array<int, 64> LastSeenPiece(chess::Color color, chess::PieceType piece_type) const {
     return last_seen_[chess::ToInt(color)][(int) piece_type - 1];
   }
-
-  int TotalPieces() const { return total_pieces_; }
-
-  void AddPiece() { total_pieces_++; }
-
-  int Pawns(chess::Color color) const { return color == chess::Color::kWhite ? w_pawns : b_pawns; }
-  int Rooks(chess::Color color) const { return color == chess::Color::kWhite ? w_rooks : b_rooks; }
-  int Knights(chess::Color color) const { return color == chess::Color::kWhite ? w_knights : b_knights; }
-  int Bishops(chess::Color color) const { return color == chess::Color::kWhite ? w_bishops : b_bishops; }
-  int Queens(chess::Color color) const { return color == chess::Color::kWhite ? w_queens : b_queens; }
-
-  void AddRook(chess::Color color) { color == chess::Color::kWhite ? w_rooks++ : b_rooks++; }
-  void AddPawn(chess::Color color) { color == chess::Color::kWhite ? w_pawns++ : b_pawns++; }
-  void AddKnight(chess::Color color) { color == chess::Color::kWhite ? w_knights++ : b_knights++; }
-  void AddBishop(chess::Color color) { color == chess::Color::kWhite ? w_bishops++ : b_bishops++; }
-  void AddQueen(chess::Color color) { color == chess::Color::kWhite ? w_queens++ : b_queens++; }
 
  protected:
   void DoApplyAction(Action action) override;
@@ -151,19 +135,8 @@ class DarkChessState : public State {
 
   // TODO(kubicon) This is specific for 8x8 chess and is here only for now.
   // For each color, each piece it stores the time when it was saw the last time at given position by opponent
-  std::vector<std::vector<std::vector<int>>> last_seen_;
+  std::array<std::array<std::array<int, 64>, 6>, 2> last_seen_;
 
-  int total_pieces_ = 0;
-  int w_pawns = 0;
-  int w_rooks = 0;
-  int w_knights = 0;
-  int w_bishops = 0;
-  int w_queens = 0;
-  int b_pawns = 0;
-  int b_rooks = 0;
-  int b_knights = 0;
-  int b_bishops = 0;
-  int b_queens = 0;
   // RepetitionTable records how many times the given hash exists in the history
   // stack (including the current board).
   // We are already indexing by board hash, so there is no need to hash that
@@ -187,40 +160,8 @@ class DarkChessGame : public Game {
     return chess::NumDistinctActions();
   }
   std::unique_ptr<State> NewInitialState() const override {
-    // set total_pieces_ to the number of pieces on the board
-    auto state = absl::make_unique<DarkChessState>(shared_from_this(), board_size_,
+    return absl::make_unique<DarkChessState>(shared_from_this(), board_size_,
                                              fen_);
-    for (int y = 0; y < board_size_; ++y) {
-      for (int x = 0; x < board_size_; ++x) {
-        chess::Square sq{x, y};
-        chess::Piece piece = state->Board().at(sq);
-        if (piece.color != chess::Color::kEmpty) {
-          state->AddPiece();
-          switch (piece.type) {
-            case chess::PieceType::kPawn:
-              state->AddPawn(piece.color);
-              break;
-            case chess::PieceType::kRook:
-              state->AddRook(piece.color);
-              break;
-            case chess::PieceType::kKnight:
-              state->AddKnight(piece.color);
-              break;
-            case chess::PieceType::kBishop:
-              state->AddBishop(piece.color);
-              break;
-            case chess::PieceType::kQueen:
-              state->AddQueen(piece.color);
-              break;
-            case chess::PieceType::kKing:
-              break;
-            default:
-              SpielFatalError("Unknown piece type");
-          }
-        }
-      }
-    }
-    return state;
   }
   int NumPlayers() const override { return chess::NumPlayers(); }
   double MinUtility() const override { return LossUtility(); }
@@ -229,12 +170,11 @@ class DarkChessGame : public Game {
   std::vector<int> ObservationTensorShape() const override {
 
     return {
-      board_size_, board_size_,
-      6 + // Player piece types
-      6 + // Opponent piece types
+      chess::kMaxBoardSize, chess::kMaxBoardSize,
+      6 + // Player pieces
+      6 + // Opponent pieces
       1 + // Empty tile
       1 + // Unknown tile
-      1 + // information about the opponent's remaining pieces
       1 // 3 public: repetitions count in one-hot encoding, 2 public: side to play, 1 public: irreversible move counter -- a fraction of $n over 100, 4 private: left/right castling rights, one-hot encoded. In the dark chess original this require only 10 tiles, so we will have some overhead
     };
 
@@ -252,9 +192,9 @@ class DarkChessGame : public Game {
 
   std::vector<int> StateTensorShape() const override { 
     return {
-      board_size_, board_size_,
-      6 + // Player piece types
-      6 + // Opponent piece types
+      chess::kMaxBoardSize, chess::kMaxBoardSize,
+      6 + // Player pieces
+      6 + // Opponent pieces
       1 + // Empty tile
       // 1 + // Unknown tile not necessary in state tensor
       1 // 3 public: repetitions count in one-hot encoding, 2 public: side to play, 1 public: irreversible move counter -- a fraction of $n over 100, 4 private: left/right castling rights, one-hot encoded. In the dark chess original this require only 10 tiles, so we will have some overhead
