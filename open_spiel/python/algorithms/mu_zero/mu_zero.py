@@ -707,14 +707,16 @@ class MuZero():
     real_next_state = jnp.roll(real_next_state, shift=-1, axis=0)
     
     
-    normalization = jnp.sum(valid)
+    dynamics_normalization = jnp.sum(valid)
+    normalization = jnp.sum(timestep.valid)
     
-    dynamics_loss = (lax.stop_gradient(real_next_state) - next_state)
-    dynamics_loss = jnp.sum(dynamics_loss ** 2) / (normalization + (normalization == 0))
+    dynamics_loss = (lax.stop_gradient(real_next_state) - next_state) * valid[..., None, None]
+    dynamics_loss = jnp.sum(dynamics_loss ** 2) / (dynamics_normalization + (dynamics_normalization == 0))
     
-    reward_loss = jnp.sum((reward - next_reward) ** 2) / (normalization + (normalization == 0))
+    reward_loss = ((reward - next_reward) ** 2) * timestep.valid[..., None]
+    reward_loss = jnp.sum(reward_loss) / (normalization + (normalization == 0))
     
-    terminal_loss = optax.sigmoid_binary_cross_entropy(is_terminal[..., None],  1 - valid)
+    terminal_loss = optax.sigmoid_binary_cross_entropy(jnp.squeeze(is_terminal),  1 - valid) * timestep.valid
     terminal_loss = jnp.sum(terminal_loss) / (normalization + (normalization == 0))
     
     return dynamics_loss + reward_loss + terminal_loss
@@ -1030,11 +1032,11 @@ def goofspiel_compare_learned_trees(muzero, jax_game, orig_game):
         print(jnp.linalg.norm(predicted_p1_iset - abstracted_p1_iset))
         print(predicted_p2_iset)
         print(abstracted_p2_iset)
-        print(jnp.norm(predicted_p2_iset - abstracted_p2_iset))
+        print(jnp.linalg.norm(predicted_p2_iset - abstracted_p2_iset))
         print(predicted_reward)
         print(new_rewards)
         print(new_state.is_terminal())
-        print(predicted_terminal)
+        print(predicted_terminal > 0.0)
         
         
         _traverse_tree((new_point_cards, new_played_cards, new_p1_points, new_legals, info[4]+1), new_state)
@@ -1072,7 +1074,7 @@ def main():
   
   # profiler = Profiler()
   # profiler.start()
-  for _ in range(20000):
+  for _ in range(40000):
     muzero.goofspiel_step()
      
   goofspiel_compare_learned_trees(muzero, game, orig_game)
