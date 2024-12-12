@@ -682,76 +682,50 @@ class MuZero():
     return _compute_soft_kmeans_loss(pi_v, jnp.concatenate(similarity, -1), iset_probs) 
     
   def non_abstracted_dynamics_loss(self, dynamics_params, timestep: TimeStep):
-    vectorized_dynamics = jax.vmap(self.dynamics_network.apply, in_axes=(None, 0, 0, 0, 0), out_axes=(0, 0, 0, 0))
     
-    next_p1_iset, next_p2_iset, next_reward, is_terminal = vectorized_dynamics(dynamics_params, timestep.obs[..., 0, :], timestep.obs[..., 1, :], timestep.action[..., 0, :], timestep.action[..., 1, :]) 
     
-    merged_state = jnp.stack((timestep.obs[..., 0, :], timestep.obs[..., 1, :]), axis=-2)
-    next_real_state = jnp.roll(merged_state, shift=-1, axis=0)
-    next_state = jnp.stack((next_p1_iset, next_p2_iset), axis=-2)
-    
-    valid = lax.pad(timestep.valid, 0.0, [(0, 1, 0), (0, 0, 0)])[1:]
-    reward = jnp.stack((timestep.reward, -timestep.reward), axis=-1)
-    
-    dynamics_normalization = jnp.sum(valid)
-    normalization = jnp.sum(timestep.valid)
-    
-    dynamics_loss = (lax.stop_gradient(next_real_state) - next_state) * valid[..., None, None]
-    dynamics_loss = jnp.sum(dynamics_loss ** 2) / (dynamics_normalization + (dynamics_normalization == 0))
-    
-    reward_loss = ((lax.stop_gradient(reward) - next_reward) ** 2) * timestep.valid[..., None]
-    reward_loss = jnp.sum(reward_loss) / (normalization + (normalization == 0))
-    
-    terminal_loss = optax.sigmoid_binary_cross_entropy(jnp.squeeze(is_terminal),  lax.stop_gradient(1 - valid)) * timestep.valid
-    terminal_loss = jnp.sum(terminal_loss) / (normalization + (normalization == 0))
-    
-    return dynamics_loss + reward_loss + terminal_loss
+    return self.dynamics_loss(dynamics_params, timestep.obs, timestep.action, timestep.valid, timestep.reward)
+
     
   def dynamics_loss(self, dynamics_params, abstraction_params, iset_encoder_params, timestep: TimeStep):
-    vectorized_abstraction = jax.vmap(self.abstraction_network.apply, in_axes=(None, 0), out_axes=0)
-    vectorized_iset_encoder = jax.vmap(self.iset_encoder.apply, in_axes=(None, 0), out_axes=0)  
     
-    p1_abstraction = vectorized_abstraction(abstraction_params[0], timestep.public_state)
-    p2_abstraction = vectorized_abstraction(abstraction_params[1], timestep.public_state)
-    p1_iset_probs = vectorized_iset_encoder(iset_encoder_params[0], timestep.obs[..., 0, :])
-    p2_iset_probs = vectorized_iset_encoder(iset_encoder_params[1], timestep.obs[..., 1, :])
+    vectorized_abstraction = jax.vmap(self._jit_get_abstraction, in_axes=(None, None, 0, 0), out_axes=0)
     
+    p1_current_iset = vectorized_abstraction(abstraction_params[0], iset_encoder_params[0], timestep.public_state, timestep.obs[..., 0, :])
+    p2_current_iset = vectorized_abstraction(abstraction_params[1], iset_encoder_params[1], timestep.public_state, timestep.obs[..., 1, :])
     
-    p1_current_iset = jnp.squeeze(jnp.take_along_axis(p1_abstraction, jnp.argmax(p1_iset_probs, axis=-1, keepdims=True)[..., None], axis=-2))
-    p2_current_iset = jnp.squeeze(jnp.take_along_axis(p2_abstraction, jnp.argmax(p2_iset_probs, axis=-1, keepdims=True)[..., None], axis=-2))
-    
-    
+    return self.dynamics_loss(dynamics_params, jnp.stack([p1_current_iset, p2_current_iset], -2), timestep.action, timestep.valid, timestep.reward)
   
-    valid = lax.pad(timestep.valid, 0.0, [(0, 1, 0), (0, 0, 0)])[1:]
-    reward = jnp.stack((timestep.reward, -timestep.reward), axis=-1)
+   
+  def dynamics_loss(self, dynamics_params, iset, action, valid, reward):
+    
+    non_terminal = lax.pad(valid, 0.0, [(0, 1, 0), (0, 0, 0)])[1:]
+    reward = jnp.stack((reward, -reward), axis=-1)
     
     vectorized_dynamics = jax.vmap(self.dynamics_network.apply, in_axes=(None, 0, 0, 0, 0), out_axes=(0, 0, 0, 0))
     
-    
-    next_p1_iset, next_p2_iset, next_reward, is_terminal = vectorized_dynamics(dynamics_params, p1_current_iset, p2_current_iset, timestep.action[..., 0, :], timestep.action[..., 1, :]) 
+    next_p1_iset, next_p2_iset, next_reward, is_terminal = vectorized_dynamics(dynamics_params, iset[..., 0, :], iset[..., 1, :], action[..., 0, :], action[..., 1, :]) 
     
     next_state = jnp.stack((next_p1_iset, next_p2_iset), axis=-2)
-    real_next_state = jnp.stack((p1_current_iset, p2_current_iset), axis=-2)
     
-    real_next_state = jnp.roll(real_next_state, shift=-1, axis=0)
+    real_next_state = jnp.roll(iset, shift=-1, axis=0)
     
     
-    dynamics_normalization = jnp.sum(valid)
-    normalization = jnp.sum(timestep.valid)
+    dynamics_normalization = jnp.sum(non_terminal)
+    normalization = jnp.sum(valid)
     
-    dynamics_loss = (lax.stop_gradient(real_next_state) - next_state) * valid[..., None, None]
+    dynamics_loss = (lax.stop_gradient(real_next_state) - next_state) * non_terminal[..., None, None]
     dynamics_loss = jnp.sum(dynamics_loss ** 2) / (dynamics_normalization + (dynamics_normalization == 0))
     
-    reward_loss = ((lax.stop_gradient(reward) - next_reward) ** 2) * timestep.valid[..., None]
+    reward_loss = ((lax.stop_gradient(reward) - next_reward) ** 2) * valid[..., None]
     reward_loss = jnp.sum(reward_loss) / (normalization + (normalization == 0))
     
-    terminal_loss = optax.sigmoid_binary_cross_entropy(jnp.squeeze(is_terminal),  lax.stop_gradient(1 - valid)) * timestep.valid
+    terminal_loss = optax.sigmoid_binary_cross_entropy(jnp.squeeze(is_terminal),  lax.stop_gradient(1 - non_terminal)) * valid
     terminal_loss = jnp.sum(terminal_loss) / (normalization + (normalization == 0))
     
     return dynamics_loss + reward_loss + terminal_loss
-   
       
-  @functools.partial(jax.jit, static_argnums=(0,))
+  # @functools.partial(jax.jit, static_argnums=(0,))
   def update_parameters(
     self,
     params: chex.ArrayTree,
@@ -851,7 +825,7 @@ class MuZero():
     
     self.learner_steps += 1
     
-  @functools.partial(jax.jit, static_argnums=(0,))
+  # @functools.partial(jax.jit, static_argnums=(0,))
   def update_goofspiel_parameters(
     self,
     params: chex.ArrayTree,
