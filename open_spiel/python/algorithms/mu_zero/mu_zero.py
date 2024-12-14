@@ -7,7 +7,7 @@ from open_spiel.python.algorithms.rnad.rnad import RNaDSolver, RNaDConfig
 from open_spiel.python.policy import TabularPolicy
 from open_spiel.python.algorithms.exploitability import exploitability
 
-from typing import Sequence, Any
+from typing import Sequence, Any, Callable
 from pyinstrument import Profiler
 import jax
 import jax.numpy as jnp
@@ -23,6 +23,10 @@ import pyspiel
 
 import functools
 
+# Taken from RNaD original
+Params = chex.ArrayTree
+Optimizer = Callable[[Params, Params], Params] 
+
 @chex.dataclass(frozen=True)
 class TimeStep():
   
@@ -35,6 +39,32 @@ class TimeStep():
   policy: chex.Array = () # [..., Player, A]
   
   reward: chex.Array = () # [..., 1] Reward after playing an action
+ 
+@chex.dataclass
+class Optimizers:
+  rnad_optimizer: Optimizer = ()
+  rnad_optimizer_target: Optimizer = ()
+  mvs_optimizer: Optimizer = ()
+  transformation_opitimizer: Sequence[Optimizer] = () 
+  abstraction_optimizer: Sequence[Optimizer]  = ()
+  iset_encoder_optimizer: Sequence[Optimizer]  = ()
+  similarity_optimizer: Sequence[Optimizer]  = ()
+  dynamics_optimizer: Optimizer = ()
+ 
+@chex.dataclass
+class NetworkParameters:
+  rnad_params: Params = ()
+  rnad_params_target: Params = ()
+  rnad_params_prev: Params = ()
+  rnad_params_prev_: Params = ()
+  mvs_params: Params = ()
+  transformation_params: Sequence[Params] = () 
+  abstraction_params: Sequence[Params] = ()
+  iset_encoder_params: Sequence[Params] = ()
+  similarity_params: Sequence[Params] = ()
+  dynamics_params: Params = ()
+  
+  
   
 # Holds the important properties that should be important as a similarity metric between 2 infosets for clustering
 class SimilarityNetwork(nn.Module):
@@ -116,6 +146,50 @@ class LegalActionsNetwork(nn.Module):
     # x = nn.sigmoid(x)
     return x
  
+class TransformationNetwork(nn.Module):
+  hidden_size: int
+  transformations: int
+  actions: int
+  
+  @nn.compact
+  def __call__(self, x: chex.Array) -> Any:
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    x = nn.Dense(self.transformations * self.actions)(x)
+    x = jnp.squeeze(x.reshape((-1, self.transformations, self.actions)))
+    return x
+
+class MAVSNetwork(nn.Module):
+  hidden_size: int
+  values: int 
+  
+  @nn.compact
+  def __call__(self, x: chex.Array) -> Any:
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    x = nn.Dense(self.values * self.values)(x)
+    x = jnp.squeeze(x.reshape((-1, self.values, self.values)))
+    return x 
+  
+class MUVSNetwork(nn.Module):
+  hidden_size: int
+  p1_values: int
+  p2_values: int
+  
+  @nn.compact
+  def __call__(self, x: chex.Array) -> Any:
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    x = nn.Dense(self.values + self.values)(x)
+    x = jnp.squeeze(x.reshape((-1, 2, self.values)))
+    return x
+ 
 @chex.dataclass(frozen=True)
 class MuZeroConfig: 
   
@@ -131,6 +205,9 @@ class MuZeroConfig:
   dynamics_hidden_size: int = 64
   legal_actions_hidden_size: int = 64
   rnad_hidden_size: int = 256
+  
+  transformations: int = 10
+  matrix_valued_states: bool = True
   
   entropy_schedule_repeats: Sequence[int] = (1,)
   entropy_schedule_size: Sequence[int] = (2000,)
@@ -213,52 +290,78 @@ class MuZero():
     self.rnad_network = RNaDNework(self.config.rnad_hidden_size, self.actions)
     self.abstraction_network = PublicStateEncoder(self.config.ps_hidden_size, self.config.abstraction_size, self.config.abstraction_amount)
     self.iset_encoder = InfosetEncoder(self.config.iset_hidden_size, self.config.abstraction_amount)
-    
     self.similarity_network = SimilarityNetwork(self.config.iset_hidden_size, self.actions)
-    
     # self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.example_timestep.obs.shape[-1])
     self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.config.abstraction_size)
+    
+    self.transformation_network = TransformationNetwork(self.config.dynamics_hidden_size, self.config.transformations, self.actions)
+    self.mvs_network = MAVSNetwork(self.config.dynamics_hidden_size, self.config.transformations)
     
     self._rnad_loss = jax.value_and_grad(self.rnad_loss, has_aux=False)
     
     self._abstraction_loss = jax.value_and_grad(self.abstraction_loss, argnums=[0,1,2], has_aux=False)
     
-    self._dynamics_loss = jax.value_and_grad(self.dynamics_loss, has_aux=False)
+    self._dynamics_loss = jax.value_and_grad(self.abstracted_dynamics_loss, has_aux=False)
+    
+    
+    
+    # self._mvs_loss = 
+    
     # self._dynamics_loss = jax.value_and_grad(self.non_abstracted_dynamics_loss, has_aux=False)
     # self._non_abstracted_dynamics_loss = jax.value_and_grad(self.non_abstracted_dynamics_loss, has_aux=False)
     
     temp_key = self.get_next_rng_key()
-    self.params = self.rnad_network.init(temp_key, self.example_timestep.obs, self.example_timestep.legal)
-    self.params_target = self.rnad_network.init(temp_key, self.example_timestep.obs, self.example_timestep.legal)
-    self.params_prev = self.rnad_network.init(temp_key, self.example_timestep.obs, self.example_timestep.legal)
-    self.params_prev_ = self.rnad_network.init(temp_key, self.example_timestep.obs, self.example_timestep.legal)
+    params = self.rnad_network.init(temp_key, self.example_timestep.obs, self.example_timestep.legal)
+    params_target = self.rnad_network.init(temp_key, self.example_timestep.obs, self.example_timestep.legal)
+    params_prev = self.rnad_network.init(temp_key, self.example_timestep.obs, self.example_timestep.legal)
+    params_prev_ = self.rnad_network.init(temp_key, self.example_timestep.obs, self.example_timestep.legal)
     
-    self.optimizer = optax_optimizer(self.params, optax.chain(optax.adam(self.config.learning_rate, b1=0.0), optax.clip(100)))
-    self.optimizer_target = optax_optimizer(self.params_target, optax.sgd(self.config.target_network_update))
+    optimizer = optax_optimizer(params, optax.chain(optax.adam(self.config.learning_rate, b1=0.0), optax.clip(100)))
+    optimizer_target = optax_optimizer(params_target, optax.sgd(self.config.target_network_update))
     
     temp_keys = self.get_next_rng_keys(7)
     
     # TODO: Different init?
-    self.p1_abstraction_params = self.abstraction_network.init(temp_keys[0], self.example_timestep.public_state)
-    self.p2_abstraction_params = self.abstraction_network.init(temp_keys[1], self.example_timestep.public_state)
+    p1_abstraction_params = self.abstraction_network.init(temp_keys[0], self.example_timestep.public_state)
+    p2_abstraction_params = self.abstraction_network.init(temp_keys[1], self.example_timestep.public_state)
     # TODO: Do we want 2 different networks for iset encoder and legal action?
-    self.p1_iset_encoder_params = self.iset_encoder.init(temp_keys[2], self.example_timestep.obs)
-    self.p2_iset_encoder_params = self.iset_encoder.init(temp_keys[3], self.example_timestep.obs)
+    p1_iset_encoder_params = self.iset_encoder.init(temp_keys[2], self.example_timestep.obs)
+    p2_iset_encoder_params = self.iset_encoder.init(temp_keys[3], self.example_timestep.obs)
     
-    self.p1_similarity_params = self.similarity_network.init(temp_keys[4], np.ones((1, self.config.abstraction_size)))
-    self.p2_similarity_params = self.similarity_network.init(temp_keys[5], np.ones((1, self.config.abstraction_size)))
+    p1_similarity_params = self.similarity_network.init(temp_keys[4], np.ones((1, self.config.abstraction_size)))
+    p2_similarity_params = self.similarity_network.init(temp_keys[5], np.ones((1, self.config.abstraction_size)))
     
     # self.dynamics_params = self.dynamics_network.init(temp_keys[6], self.example_timestep.obs, self.example_timestep.obs, self.example_timestep.action, self.example_timestep.action)
-    self.dynamics_params = self.dynamics_network.init(temp_keys[6], np.ones((1, self.config.abstraction_size)), np.ones((1, self.config.abstraction_size)), self.example_timestep.action, self.example_timestep.action)
+    dynamics_params = self.dynamics_network.init(temp_keys[6], np.ones((1, self.config.abstraction_size)), np.ones((1, self.config.abstraction_size)), self.example_timestep.action, self.example_timestep.action)
     
-    self.p1_abstraction_optimizer = optax_optimizer(self.p1_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
-    self.p2_abstraction_optimizer = optax_optimizer(self.p2_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
-    self.p1_iset_encoder_optimizer = optax_optimizer(self.p1_iset_encoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
-    self.p2_iset_encoder_optimizer = optax_optimizer(self.p2_iset_encoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
-    self.p1_similarity_optimizer = optax_optimizer(self.p1_similarity_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
-    self.p2_similarity_optimizer = optax_optimizer(self.p2_similarity_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    p1_abstraction_optimizer = optax_optimizer(p1_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    p2_abstraction_optimizer = optax_optimizer(p2_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    p1_iset_encoder_optimizer = optax_optimizer(p1_iset_encoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    p2_iset_encoder_optimizer = optax_optimizer(p2_iset_encoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    p1_similarity_optimizer = optax_optimizer(p1_similarity_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    p2_similarity_optimizer = optax_optimizer(p2_similarity_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     
-    self.dynamics_optimizer = optax_optimizer(self.dynamics_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    dynamics_optimizer = optax_optimizer(dynamics_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    
+    self.optimizers = Optimizers(
+      rnad_optimizer = optimizer,
+      rnad_optimizer_target = optimizer_target,
+      abstraction_optimizer = (p1_abstraction_optimizer, p2_abstraction_optimizer),
+      iset_encoder_optimizer = (p1_iset_encoder_optimizer, p2_iset_encoder_optimizer),
+      similarity_optimizer = (p1_similarity_optimizer, p2_similarity_optimizer),
+      dynamics_optimizer = dynamics_optimizer
+    )
+    
+    self.network_parameters = NetworkParameters(
+      rnad_params = params,
+      rnad_params_target = params_target,
+      rnad_params_prev = params_prev,
+      rnad_params_prev_ = params_prev_,
+      abstraction_params = (p1_abstraction_params, p2_abstraction_params),
+      iset_encoder_params = (p1_iset_encoder_params, p2_iset_encoder_params),
+      similarity_params = (p1_similarity_params, p1_similarity_params),
+      dynamics_params = dynamics_params
+    )
     
     self.learner_steps = 0
    
@@ -336,38 +439,30 @@ class MuZero():
     picked_iset = jnp.argmax(iset, axis=-1, keepdims=True)
     return jnp.squeeze(jnp.take_along_axis(abstraction, picked_iset[..., jnp.newaxis], axis=-2))
   
+  # The observaiton is already only for a given player pl
   def get_abstraction(self, public_state, obs, pl):
-    if pl == 0:
-      return self._jit_get_abstraction(self.p1_abstraction_params, self.p1_iset_encoder_params, public_state, obs)
-    else:
-      return self._jit_get_abstraction(self.p2_abstraction_params, self.p2_iset_encoder_params, public_state, obs)
+    return self._jit_get_abstraction(self.network_parameters.abstraction_params[pl], self.network_parameters.iset_encoder_params[pl], public_state, obs) 
   
   def get_both_abstraction(self, public_state, p1_iset, p2_iset):
-    p1_abstraction_iset = self._jit_get_abstraction(self.p1_abstraction_params, self.p1_iset_encoder_params, public_state, p1_iset)
-    p2_abstraction_iset = self._jit_get_abstraction(self.p2_abstraction_params, self.p2_iset_encoder_params, public_state, p2_iset)
+    p1_abstraction_iset = self._jit_get_abstraction(self.network_parameters.abstraction_params[0], self.network_parameters.iset_encoder_params[0], public_state, p1_iset)
+    p2_abstraction_iset = self._jit_get_abstraction(self.network_parameters.abstraction_params[1], self.network_parameters.iset_encoder_params[1], public_state, p2_iset)
     return p1_abstraction_iset, p2_abstraction_iset
   
+  # Expects isets in the original game definition and action as a index of the action
   def get_next_state(self, public_state, p1_iset, p2_iset, p1_action, p2_action):
     p1_abstraction_iset, p2_abstraction_iset = self.get_both_abstraction(public_state, p1_iset, p2_iset)
-    return self._jit_get_next_state(self.dynamics_params, p1_abstraction_iset, p2_abstraction_iset, p1_action, p2_action) 
+    return self._jit_get_next_state(self.network_parameters.dynamics_params, p1_abstraction_iset, p2_abstraction_iset, p1_action, p2_action) 
     
-  def get_legal_actions(self, public_state, obs, pl):
-    if pl == 0:
-      params = self.p1_abstraction_params
-      iset_encoder_params = self.p1_iset_encoder_params
-      legal_params = self.p1_legal_params
-    else:
-      params = self.p2_abstraction_params
-      iset_encoder_params = self.p2_iset_encoder_params
-      legal_params = self.p2_legal_params
-    return self._jit_get_legal_actions(params, iset_encoder_params, legal_params, public_state, obs)
+  def get_legal_actions(self, public_state, obs, pl): 
+    assert False, "Do not call this method, it is here only because of the older PoC version."
+    return self._jit_get_legal_actions(self.network_parameters.abstraction_params[pl], self.network_parameters.iset_encoder_params[pl], self.network_parameters.legal_params[pl], public_state, obs)
   
   # Expects obs and legal to be in shape [Batch, Player, ...]
   def batch_policy_and_action(self, obs, legal):
     
     keys = self.get_next_rng_keys_dimensional(obs.shape[:2])
     keys = np.array(keys)
-    pi, action, action_oh = self._jit_get_batch_policy(self.params, keys, obs, legal)
+    pi, action, action_oh = self._jit_get_batch_policy(self.network_parameters.rnad_params, keys, obs, legal)
     # pi, action, action_oh = self._jit_get_policy_and_action(self.params, keys, obs, legal)
     pi = np.array(pi, dtype=np.float64)
     pi = pi / np.sum(pi, axis=-1, keepdims=True) # TODO: Remove this
@@ -378,7 +473,7 @@ class MuZero():
   def get_policy(self, state: pyspiel.State, player: int):
     obs = state.information_state_tensor(player) 
     legal = state.legal_actions_mask(player)
-    pi = self._jit_get_policy(self.params, obs, legal)
+    pi = self._jit_get_policy(self.network_parameters.rnad_params, obs, legal)
     return np.array(pi, dtype=np.float32)
    
   def get_policy_both(self, state: pyspiel.State):
@@ -386,7 +481,7 @@ class MuZero():
     legal = [state.legal_actions_mask(pl) for pl in range(2)]
     obs = np.array(obs, dtype=np.float32)
     legal = np.array(legal, dtype=np.int8)
-    pi = self._jit_get_policy(self.params, obs, legal)
+    pi = self._jit_get_policy(self.network_parameters.rnad_params, obs, legal)
     pi = np.array(pi, dtype=np.float64)
     return pi[0], pi[1]
   
@@ -687,7 +782,7 @@ class MuZero():
     return self.dynamics_loss(dynamics_params, timestep.obs, timestep.action, timestep.valid, timestep.reward)
 
     
-  def dynamics_loss(self, dynamics_params, abstraction_params, iset_encoder_params, timestep: TimeStep):
+  def abstracted_dynamics_loss(self, dynamics_params, abstraction_params, iset_encoder_params, timestep: TimeStep):
     
     vectorized_abstraction = jax.vmap(self._jit_get_abstraction, in_axes=(None, None, 0, 0), out_axes=0)
     
@@ -725,164 +820,111 @@ class MuZero():
     
     return dynamics_loss + reward_loss + terminal_loss
       
-  # @functools.partial(jax.jit, static_argnums=(0,))
+  @functools.partial(jax.jit, static_argnums=(0,))
   def update_parameters(
     self,
-    params: chex.ArrayTree,
-    params_target: chex.ArrayTree,
-    params_prev: chex.ArrayTree,
-    params_prev_: chex.ArrayTree,
-    abstraction_params: chex.ArrayTree,
-    iset_encoder_params: chex.ArrayTree,
-    similarity_params: chex.ArrayTree,
-    dynamics_params: chex.ArrayTree,
-    optimizer,
-    optimizer_target,
-    abstraction_optimizer,
-    iset_encoder_optimizer,
-    similarity_optimizer,
-    dynamics_optimizer,
+    network_parameters: NetworkParameters,
+    optimizers: Optimizers,
     timestep: TimeStep,
     alpha: float,
     update_net, 
   ):
     
-    loss, grad = self._rnad_loss(params, params_target, params_prev, params_prev_, timestep, alpha)
+    loss, grad = self._rnad_loss(network_parameters.rnad_params, network_parameters.rnad_params_target, network_parameters.rnad_params_prev, network_parameters.rnad_params_prev_, timestep, alpha)
     
     
     
-    params = optimizer(params, grad)
+    rnad_params = optimizers.rnad_optimizer(network_parameters.rnad_params, grad)
     
-    params_target = optimizer_target(
-        params_target, jax.tree.map(lambda a, b: a - b, params_target, params))
+    rnad_params_target = optimizers.rnad_optimizer_target(
+        network_parameters.rnad_params_target, jax.tree.map(lambda a, b: a - b, network_parameters.rnad_params_target, rnad_params))
     
     
     vectorized_net_apply = jax.vmap(jax.vmap(self.rnad_network.apply, in_axes=(None, 0, 0), out_axes=0), in_axes=(None, 1, 1), out_axes=1)
     # v will not be used in future! Here it contains the regularized value functio
-    pi, v, _, _ = vectorized_net_apply(params, timestep.obs, timestep.legal)
+    pi, v, _, _ = vectorized_net_apply(network_parameters.rnad_params, timestep.obs, timestep.legal)
     pi_v = jnp.concatenate((pi, v), axis=-1)
     abs_grad = []
     for pl in range(2):
-      abstraction_loss, abstraction_grad = self._abstraction_loss(abstraction_params[pl], iset_encoder_params[pl], similarity_params[pl], jax.lax.stop_gradient(pi_v[..., pl, :]), timestep.public_state, timestep.obs[..., pl, :])
+      abstraction_loss, abstraction_grad = self._abstraction_loss(
+        network_parameters.abstraction_params[pl], 
+        network_parameters.iset_encoder_params[pl], 
+        network_parameters.similarity_params[pl], 
+        jax.lax.stop_gradient(pi_v[..., pl, :]), 
+        timestep.public_state, 
+        timestep.obs[..., pl, :])
       
       # abstraction_loss, abstraction_grad = self._abstraction_loss(abstraction_params[pl], iset_encoder_params[pl], similarity_params[pl], jnp.concatenate([timestep.legal[..., 0, :], jnp.zeros_like(jnp.squeeze(v)[..., :1])], -1), timestep.public_state, timestep.obs[..., pl, :])
       abs_grad.append(abstraction_grad)
     
-    abstraction_params = (*[abstraction_optimizer[pl](abstraction_params[pl], abs_grad[pl][0]) for pl in range(2)],)
-    iset_encoder_params = (*[iset_encoder_optimizer[pl](iset_encoder_params[pl], abs_grad[pl][1]) for pl in range(2)],)
-    similarity_params = (*[similarity_optimizer[pl](similarity_params[pl], abs_grad[pl][2]) for pl in range(2)],)
+    abstraction_params = (*[optimizers.abstraction_optimizer[pl](network_parameters.abstraction_params[pl], abs_grad[pl][0]) for pl in range(2)],)
+    iset_encoder_params = (*[optimizers.iset_encoder_optimizer[pl](network_parameters.iset_encoder_params[pl], abs_grad[pl][1]) for pl in range(2)],)
+    similarity_params = (*[optimizers.similarity_optimizer[pl](network_parameters.similarity_params[pl], abs_grad[pl][2]) for pl in range(2)],)
     
     
     # dynamics_loss, dynamics_grad = self._dynamics_loss(dynamics_params, timestep)
     
-    dynamics_loss, dynamics_grad = self._dynamics_loss(dynamics_params, abstraction_params, iset_encoder_params, timestep)
+    dynamics_loss, dynamics_grad = self._dynamics_loss(
+      network_parameters.dynamics_params, 
+      network_parameters.abstraction_params,
+      network_parameters.iset_encoder_params,
+      timestep)
     
-    dynamics_params = dynamics_optimizer(dynamics_params, dynamics_grad)
+    dynamics_params = optimizers.dynamics_optimizer(network_parameters.dynamics_params, dynamics_grad)
     
-    params_prev, params_prev_ = jax.lax.cond(
+    rnad_params_prev, rnad_params_prev_ = jax.lax.cond(
         update_net,
-        lambda: (params_target, params_prev),
-        lambda: (params_prev, params_prev_))
-    return params, params_target, params_prev, params_prev_, abstraction_params, iset_encoder_params, similarity_params, dynamics_params, optimizer, optimizer_target, abstraction_optimizer, iset_encoder_optimizer, similarity_optimizer, dynamics_optimizer
+        lambda: (rnad_params_target, network_parameters.rnad_params_prev),
+        lambda: (network_parameters.rnad_params_prev, network_parameters.rnad_params_prev_))
+    
+    return NetworkParameters(
+      rnad_params=rnad_params,
+      rnad_params_target=rnad_params_target,
+      rnad_params_prev=rnad_params_prev,
+      rnad_params_prev_=rnad_params_prev_,
+      abstraction_params=abstraction_params,
+      iset_encoder_params=iset_encoder_params,
+      similarity_params=similarity_params,
+      dynamics_params=dynamics_params
+      ), optimizers
   
   def step(self):
     trajectory = self.sample_trajectories()
     alpha, update_regularization = self._entropy_schedule(self.learner_steps)
     
-    (self.params, 
-     self.params_target, 
-     self.params_prev, 
-     self.params_prev_, 
-     (self.p1_abstraction_params, self.p2_abstraction_params),
-     (self.p1_iset_encoder_params, self.p2_iset_encoder_params),
-     (self.p1_similarity_params, self.p2_similarity_params),
-     self.dynamics_params, 
-     self.optimizer, 
-     self.optimizer_target,
-     (self.p1_abstraction_optimizer, self.p2_abstraction_optimizer),
-     (self.p1_iset_encoder_optimizer, self.p2_iset_encoder_optimizer),
-     (self.p1_similarity_optimizer, self.p2_similarity_optimizer),
-     self.dynamics_optimizer) = self.update_parameters(
-      self.params, 
-      self.params_target, 
-      self.params_prev, 
-      self.params_prev_, 
-      (self.p1_abstraction_params, self.p2_abstraction_params),
-      (self.p1_iset_encoder_params, self.p2_iset_encoder_params),
-     (self.p1_similarity_params, self.p2_similarity_params),
-      self.dynamics_params, 
-      self.optimizer, 
-      self.optimizer_target, 
-      (self.p1_abstraction_optimizer, self.p2_abstraction_optimizer),
-      (self.p1_iset_encoder_optimizer, self.p2_iset_encoder_optimizer),
-     (self.p1_similarity_optimizer, self.p2_similarity_optimizer),
-      self.dynamics_optimizer,
+    self.network_parameters, self.optimizers = self.update_parameters(
+      self.network_parameters,
+      self.optimizers,
+      trajectory,
       alpha, 
       update_regularization)
      
-    self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target = self.update_parameters(
-      self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target, trajectory, alpha, update_regularization)
+    # self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target = self.update_parameters(
+    #   self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target, trajectory, alpha, update_regularization)
     
     self.learner_steps += 1
     
-  # @functools.partial(jax.jit, static_argnums=(0,))
+  @functools.partial(jax.jit, static_argnums=(0,))
   def update_goofspiel_parameters(
     self,
-    params: chex.ArrayTree,
-    params_target: chex.ArrayTree,
-    params_prev: chex.ArrayTree,
-    params_prev_: chex.ArrayTree,
-    abstraction_params: chex.ArrayTree,
-    iset_encoder_params: chex.ArrayTree,
-    similarity_params: chex.ArrayTree,
-    dynamics_params: chex.ArrayTree,
-    optimizer,
-    optimizer_target,
-    abstraction_optimizer,
-    iset_encoder_optimizer,
-    similarity_optimizer,
-    dynamics_optimizer,
+    network_parameters: NetworkParameters,
+    optimizers: Optimizers,
     key: chex.Array,
     alpha,
     update_net, 
   ):
-    trajectory = self.sample_goofspiel_trajectories(params, key)
+    trajectory = self.sample_goofspiel_trajectories(network_parameters.rnad_params, key)
     
     
-    return self.update_parameters(params, params_target, params_prev, params_prev_, abstraction_params, iset_encoder_params, similarity_params, dynamics_params, optimizer, optimizer_target, abstraction_optimizer, iset_encoder_optimizer, similarity_optimizer, dynamics_optimizer, lax.stop_gradient(trajectory), alpha, update_net)
+    return self.update_parameters(network_parameters, optimizers, lax.stop_gradient(trajectory), alpha, update_net)
      
   def goofspiel_step(self):
     key = self.get_next_rng_key()
     alpha, update_regularization = self._entropy_schedule(self.learner_steps)
     
-    (self.params, 
-     self.params_target, 
-     self.params_prev, 
-     self.params_prev_, 
-     (self.p1_abstraction_params, self.p2_abstraction_params),
-     (self.p1_iset_encoder_params, self.p2_iset_encoder_params),
-     (self.p1_similarity_params, self.p2_similarity_params),
-     self.dynamics_params, 
-     self.optimizer, 
-     self.optimizer_target,
-     (self.p1_abstraction_optimizer, self.p2_abstraction_optimizer),
-     (self.p1_iset_encoder_optimizer, self.p2_iset_encoder_optimizer),
-     (self.p1_similarity_optimizer, self.p2_similarity_optimizer),
-     self.dynamics_optimizer) = self.update_goofspiel_parameters(
-      self.params, 
-      self.params_target, 
-      self.params_prev, 
-      self.params_prev_, 
-      (self.p1_abstraction_params, self.p2_abstraction_params),
-      (self.p1_iset_encoder_params, self.p2_iset_encoder_params),
-     (self.p1_similarity_params, self.p2_similarity_params),
-      self.dynamics_params, 
-      self.optimizer, 
-      self.optimizer_target, 
-      (self.p1_abstraction_optimizer, self.p2_abstraction_optimizer),
-      (self.p1_iset_encoder_optimizer, self.p2_iset_encoder_optimizer),
-     (self.p1_similarity_optimizer, self.p2_similarity_optimizer),
-      self.dynamics_optimizer,
+    self.network_parameters, self.optimizers = self.update_goofspiel_parameters(
+      self.network_parameters,
+      self.optimizers,
       key, 
       alpha, 
       update_regularization)
@@ -916,7 +958,7 @@ class MuZero():
     _traverse_tree(self.game.new_initial_state())
     isets = np.array(isets, dtype=np.float32)
     legals = np.array(legals, dtype=np.int8)
-    pi = self._jit_get_policy(self.params_target, isets, legals)
+    pi = self._jit_get_policy(self.network_parameters.rnad_params_target, isets, legals)
     policy = TabularPolicy(self.game)
     # policy.
     for i, iset in enumerate(iset_set):
@@ -954,7 +996,7 @@ class MuZero():
     _traverse_tree(game.new_initial_state(), init_info)
     isets = np.array(isets, dtype=np.float32)
     legals = np.array(legals, dtype=np.int8)
-    pi = self._jit_get_policy(self.params_target, isets, legals)
+    pi = self._jit_get_policy(self.network_parameters.rnad_params_target, isets, legals)
     policy = TabularPolicy(game)
     # policy.
     for i, iset in enumerate(iset_set):
@@ -1084,31 +1126,30 @@ def main():
     params = [(n, p) for n, p in params.items()]
     muzero = RNaDSolver(RNaDConfig(game_name="goofspiel", game_params=params, trajectory_max=cards-1, batch_size=32))
   
-  
   # profiler = Profiler()
   # profiler.start()
-  for _ in range(10000):
+  for _ in range(600):
     muzero.goofspiel_step()
      
-  goofspiel_compare_learned_trees(muzero, game, orig_game)
+  # goofspiel_compare_learned_trees(muzero, game, orig_game)
   # print("Ee")
   # compare_legals(muzero, game)
   # profiler.stop()
   # print(profiler.output_text(color=True, unicode=True))
   
   # policy = muzero.extract_full_policy()
-    
-  # policy = muzero.extract_goofspiel_policy(orig_game)
+     
+  policy = muzero.extract_goofspiel_policy(orig_game)
   
-  # # print(policy.action_probabilities(state, 0))
-  # # print(policy.action_probabilities(state, 1))
-  # # print(state.information_state_tensor(0))
-  # # print(state.information_state_tensor(1))
-  # # # print(exploitability(game, policy))
-  # br1 = BestResponsePolicy(orig_game, 0, policy)
-  # br2 = BestResponsePolicy(orig_game, 1, policy)
-  # print(br1.value(orig_game.new_initial_state()))
-  # print(br2.value(orig_game.new_initial_state()))
+  # print(policy.action_probabilities(state, 0))
+  # print(policy.action_probabilities(state, 1))
+  # print(state.information_state_tensor(0))
+  # print(state.information_state_tensor(1))
+  # # print(exploitability(game, policy))
+  br1 = BestResponsePolicy(orig_game, 0, policy)
+  br2 = BestResponsePolicy(orig_game, 1, policy)
+  print(br1.value(orig_game.new_initial_state()))
+  print(br2.value(orig_game.new_initial_state()))
   
   # traj = muzero.sample_trajectories()
   # print(traj.action.shape)
