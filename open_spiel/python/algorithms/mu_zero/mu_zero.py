@@ -45,6 +45,7 @@ class Optimizers:
   rnad_optimizer: Optimizer = ()
   rnad_optimizer_target: Optimizer = ()
   mvs_optimizer: Optimizer = ()
+  mvs_optimizer_target: Optimizer = ()
   transformation_opitimizer: Sequence[Optimizer] = () 
   abstraction_optimizer: Sequence[Optimizer]  = ()
   iset_encoder_optimizer: Sequence[Optimizer]  = ()
@@ -58,6 +59,7 @@ class NetworkParameters:
   rnad_params_prev: Params = ()
   rnad_params_prev_: Params = ()
   mvs_params: Params = ()
+  mvs_params_target: Params = ()
   transformation_params: Sequence[Params] = () 
   abstraction_params: Sequence[Params] = ()
   iset_encoder_params: Sequence[Params] = ()
@@ -166,7 +168,8 @@ class MAVSNetwork(nn.Module):
   values: int 
   
   @nn.compact
-  def __call__(self, x: chex.Array) -> Any:
+  def __call__(self, p1_iset: chex.Array, p2_iset: chex.Array) -> Any:
+    x = jnp.concatenate((p1_iset, p2_iset), axis=-1)
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
     x = nn.Dense(self.hidden_size)(x)
@@ -181,7 +184,8 @@ class MUVSNetwork(nn.Module):
   p2_values: int
   
   @nn.compact
-  def __call__(self, x: chex.Array) -> Any:
+  def __call__(self, p1_iset: chex.Array, p2_iset: chex.Array) -> Any:
+    x = jnp.concatenate((p1_iset, p2_iset), axis=-1)
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
     x = nn.Dense(self.hidden_size)(x)
@@ -197,6 +201,7 @@ class MuZeroConfig:
   
   trajectory_max: int = 6
   
+  use_abstraction: bool = False
   abstraction_amount: int = 10
   abstraction_size: int = 32
   
@@ -212,8 +217,8 @@ class MuZeroConfig:
   entropy_schedule_repeats: Sequence[int] = (1,)
   entropy_schedule_size: Sequence[int] = (2000,)
   
-  learning_rate = 3e-4
-  target_network_update = 1e-3
+  learning_rate: float = 3e-4
+  target_network_update: float = 1e-3
   seed: int = 42
   
 
@@ -222,7 +227,9 @@ def _policy_ratio(pi: chex.Array, mu: chex.Array, actions_oh: chex.Array, valid:
   mu_actions_prob = jnp.sum(mu * actions_oh, axis=-1, keepdims=True) * valid + (1 - valid)
   
   return pi_actions_prob / mu_actions_prob
+
   
+
 def tree_where(pred: chex.Array, x: chex.ArrayTree, y: chex.ArrayTree) -> chex.ArrayTree:
   
   def _where(x, y):
@@ -265,15 +272,45 @@ def neurd_loss(
   
   return neurd_loss_value
 
+# TODO: Verify that merges the vectors corectly
+def transform_trajectory_to_last_dimension(x: chex.Array) -> chex.Array:
+  return jnp.moveaxis(x, 0, -2).reshape((*x.shape[1:-1], -1))
+
+def normalize_direction_with_mask(x:chex.Array, mask:chex.Array) -> chex.Array:
+
+  x = mask * x 
+  norm = jnp.linalg.norm(x, 2, -1, keepdims=True)
+  return jnp.where(norm < 1e-15, x, x / norm)
+
+# TODO: This should take valid into account
+def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: chex.Array):
+  # The predicted dimension is missing
+  chex.assert_shape((real,), (*pred.shape[:-2], pred.shape[-1]))
+  cluster_difference = lax.stop_gradient(jnp.expand_dims(real, -2)) - pred
+  cluster_distance = jnp.linalg.norm(cluster_difference, axis=-1)
+  cluster_soft_assignement = jax.nn.softmax(-cluster_distance, axis=-1)
+  cluster_loss = jnp.sum(cluster_difference ** 2, axis=-1)
+  cluster_loss = jnp.sum(cluster_loss * cluster_soft_assignement, axis=-1)
+  return jnp.mean(cluster_loss), cluster_soft_assignement
+  
+def _compute_soft_kmeans_loss_with_single(real, pred, probs):
+  cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred)
+  prob_loss = optax.losses.softmax_cross_entropy_with_integer_labels(probs, jax.lax.stop_gradient(jnp.argmax(cluster_soft_assignement, axis=-1)))
+  return cluster_loss + jnp.mean(prob_loss)
 
 # This contains RNaD implementation. Note that this implementation is specific for two-player zero-sum games. Unlike the open_spiel RNaD that can be used to general-sum multiplayer games.
 class MuZero():
   def __init__(self, game, config) -> None:
-    
+    assert config.matrix_valued_states, "Multi-valued states are not implemented."
     self.config = config
     self.game = game
     self.actions = game.num_distinct_actions()
     
+    if self.config.use_abstraction:
+      self.obs = config.abstraction_size
+    else:
+      self.obs = game.information_state_tensor_shape()
+      
     self.rng_key = jax.random.PRNGKey(self.config.seed)
     
     if isinstance(game, JaxOriginalGoofspiel):
@@ -282,6 +319,7 @@ class MuZero():
     
     self.example_state  = game.new_initial_state()
     self.example_timestep = self.default_timestep()
+    self.example_obs = np.ones((1, self.obs))
     
     self._entropy_schedule = EntropySchedule(
         sizes=self.config.entropy_schedule_size,
@@ -292,18 +330,22 @@ class MuZero():
     self.iset_encoder = InfosetEncoder(self.config.iset_hidden_size, self.config.abstraction_amount)
     self.similarity_network = SimilarityNetwork(self.config.iset_hidden_size, self.actions)
     # self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.example_timestep.obs.shape[-1])
-    self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.config.abstraction_size)
+    self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.obs)
     
     self.transformation_network = TransformationNetwork(self.config.dynamics_hidden_size, self.config.transformations, self.actions)
-    self.mvs_network = MAVSNetwork(self.config.dynamics_hidden_size, self.config.transformations)
+    self.mvs_network = MAVSNetwork(self.config.dynamics_hidden_size, self.config.transformations + 1)
+    
     
     self._rnad_loss = jax.value_and_grad(self.rnad_loss, has_aux=False)
-    
     self._abstraction_loss = jax.value_and_grad(self.abstraction_loss, argnums=[0,1,2], has_aux=False)
-    
-    self._dynamics_loss = jax.value_and_grad(self.abstracted_dynamics_loss, has_aux=False)
-    
-    
+    if self.config.use_abstraction:
+      self._dynamics_loss = jax.value_and_grad(self.abstracted_dynamics_loss, has_aux=False)
+      self._transformation_loss = jax.value_and_grad(self.abstracted_transformation_loss, has_aux=False)
+      self._mvs_loss = jax.value_and_grad(self.abstracted_mvs_loss, has_aux=False)
+    else: 
+      self._dynamics_loss = jax.value_and_grad(self.non_abstracted_dynamics_loss, has_aux=False)
+      self._transformation_loss = jax.value_and_grad(self.non_abstracted_transformation_loss, has_aux=False)
+      self._mvs_loss = jax.value_and_grad(self.non_abstracted_mvs_loss, has_aux=False)
     
     # self._mvs_loss = 
     
@@ -319,7 +361,8 @@ class MuZero():
     optimizer = optax_optimizer(params, optax.chain(optax.adam(self.config.learning_rate, b1=0.0), optax.clip(100)))
     optimizer_target = optax_optimizer(params_target, optax.sgd(self.config.target_network_update))
     
-    temp_keys = self.get_next_rng_keys(7)
+    temp_keys = self.get_next_rng_keys(10)
+    
     
     # TODO: Different init?
     p1_abstraction_params = self.abstraction_network.init(temp_keys[0], self.example_timestep.public_state)
@@ -328,11 +371,19 @@ class MuZero():
     p1_iset_encoder_params = self.iset_encoder.init(temp_keys[2], self.example_timestep.obs)
     p2_iset_encoder_params = self.iset_encoder.init(temp_keys[3], self.example_timestep.obs)
     
+    # Similarity always uses abstraction
     p1_similarity_params = self.similarity_network.init(temp_keys[4], np.ones((1, self.config.abstraction_size)))
     p2_similarity_params = self.similarity_network.init(temp_keys[5], np.ones((1, self.config.abstraction_size)))
     
     # self.dynamics_params = self.dynamics_network.init(temp_keys[6], self.example_timestep.obs, self.example_timestep.obs, self.example_timestep.action, self.example_timestep.action)
-    dynamics_params = self.dynamics_network.init(temp_keys[6], np.ones((1, self.config.abstraction_size)), np.ones((1, self.config.abstraction_size)), self.example_timestep.action, self.example_timestep.action)
+    dynamics_params = self.dynamics_network.init(temp_keys[6], self.example_obs, self.example_obs, self.example_timestep.action, self.example_timestep.action)
+    
+    mvs_params = self.mvs_network.init(temp_keys[7], self.example_obs, self.example_obs)
+    mvs_params_target = self.mvs_network.init(temp_keys[7], self.example_obs, self.example_obs)
+    
+    p1_transformation_params = self.transformation_network.init(temp_keys[8], self.example_obs)
+    p2_transformation_params = self.transformation_network.init(temp_keys[9], self.example_obs)
+    
     
     p1_abstraction_optimizer = optax_optimizer(p1_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_abstraction_optimizer = optax_optimizer(p2_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
@@ -343,9 +394,18 @@ class MuZero():
     
     dynamics_optimizer = optax_optimizer(dynamics_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     
+    mvs_optimizer = optax_optimizer(mvs_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    mvs_optimizer_target = optax_optimizer(mvs_params_target, optax.sgd(self.config.target_network_update))
+    
+    p1_transformation_optimizer = optax_optimizer(p1_transformation_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    p2_transformation_optimizer = optax_optimizer(p2_transformation_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    
     self.optimizers = Optimizers(
       rnad_optimizer = optimizer,
       rnad_optimizer_target = optimizer_target,
+      mvs_optimizer = mvs_optimizer,
+      mvs_optimizer_target = mvs_optimizer_target,
+      transformation_opitimizer = (p1_transformation_optimizer, p2_transformation_optimizer),
       abstraction_optimizer = (p1_abstraction_optimizer, p2_abstraction_optimizer),
       iset_encoder_optimizer = (p1_iset_encoder_optimizer, p2_iset_encoder_optimizer),
       similarity_optimizer = (p1_similarity_optimizer, p2_similarity_optimizer),
@@ -357,6 +417,9 @@ class MuZero():
       rnad_params_target = params_target,
       rnad_params_prev = params_prev,
       rnad_params_prev_ = params_prev_,
+      mvs_params = mvs_params,
+      mvs_params_target = mvs_params_target, 
+      transformation_params = (p1_transformation_params, p2_transformation_params), 
       abstraction_params = (p1_abstraction_params, p2_abstraction_params),
       iset_encoder_params = (p1_iset_encoder_params, p2_iset_encoder_params),
       similarity_params = (p1_similarity_params, p1_similarity_params),
@@ -715,18 +778,19 @@ class MuZero():
     ) 
     return v_target, q_value
   
+  
   def rnad_loss(
     self,
-    params: chex.ArrayTree,
-    params_target: chex.ArrayTree,
-    params_prev: chex.ArrayTree,
-    params_prev_: chex.ArrayTree,
+    params: Params,
+    params_target: Params,
+    params_prev: Params,
+    params_prev_: Params,
     timestep: TimeStep,
     alpha: float,
   ):
     
     # We map over trajectory dimension and player dimension
-    vectorized_net_apply = jax.vmap(jax.vmap(self.rnad_network.apply, in_axes=(None, 0, 0), out_axes=0), in_axes=(None, 1, 1), out_axes=1)
+    vectorized_net_apply = jax.vmap(jax.vmap(self.rnad_network.apply, in_axes=(None, 0, 0), out_axes=0), in_axes=(None, -2, -2), out_axes=-2)
     
     pi, v, log_pi, logit = vectorized_net_apply(params, timestep.obs, timestep.legal)
     
@@ -752,7 +816,198 @@ class MuZero():
     neurd_loss_value = -jnp.sum(loss_neurd * expanded_valid) / (normalization + (normalization == 0))
     return v_loss + neurd_loss_value
    
-  def abstraction_loss(self, abstraction_params, iset_encoder_params, similarity_params, pi_v, public_state, obs): 
+  def non_abstracted_transformation_loss(self, 
+                                         transformation_params: Params,
+                                         abstraction_params: Params,
+                                         iset_encoder_params: Params,
+                                         pi_before: chex.Array,
+                                         pi_after: chex.Array,
+                                         public_state: chex.Array,
+                                         obs: chex.Array,
+                                         legal: chex.Array,
+                                         valid: chex.Array):
+    return self.transformation_loss(transformation_params, pi_before, pi_after, obs, legal, valid)
+   
+  def abstracted_transformation_loss(self,
+                                     transformation_params: Params,
+                                     abstraction_params: Params,
+                                     iset_encoder_params: Params,
+                                     pi_before: chex.Array,
+                                     pi_after: chex.Array,
+                                     public_state: chex.Array,
+                                     obs: chex.Array,
+                                     legal: chex.Array,
+                                     valid: chex.Array):
+    
+    vectorized_abstraction = jax.vmap(self._jit_get_abstraction, in_axes=(None, None, 0, 0), out_axes=0)
+    current_iset = vectorized_abstraction(abstraction_params, iset_encoder_params, public_state, obs)
+    
+    return self.transformation_loss(transformation_params, pi_before, pi_after, current_iset, legal, valid)
+  
+  def transformation_loss(self,
+                          transformation_params: Params,
+                          pi_before: chex.Array,
+                          pi_after: chex.Array,
+                          obs: chex.Array,
+                          legal: chex.Array,
+                          valid: chex.Array):
+      
+    vectorized_transformation = jax.vmap(self.transformation_network.apply, in_axes=(None, 0), out_axes=0)
+    
+    predicted_direction = vectorized_transformation(transformation_params, obs)
+    
+    update_direction = (pi_after - pi_before)
+    
+    mask = legal * valid[..., jnp.newaxis]
+    
+    predicted_direction = normalize_direction_with_mask(predicted_direction, mask[..., jnp.newaxis, :])
+    update_direction = normalize_direction_with_mask(update_direction, mask)
+    
+    # TODO: This makes the whole trajectory into a single policy vector. Shall we do it this way? Maybe compare it with the old implementation
+    predicted_direction = transform_trajectory_to_last_dimension(predicted_direction)
+    update_direction = transform_trajectory_to_last_dimension(update_direction)
+    
+    loss, _ = _compute_soft_kmeans_loss_with_cluster_assignments(update_direction, predicted_direction)
+    return loss
+  
+  def state_v_trace(
+    self,
+    v: chex.Array,
+    sampling_policy: chex.Array,
+    transformed_policy: chex.Array, 
+    actions_oh: chex.Array,
+    valid: chex.Array,
+    reward: chex.Array, # Still not regularized
+    lambda_: float = 1.0, # Lambda parameter for V-trace
+    c: float = 1.0, # Importance sampling clipping
+    rho: float = 1.0, # Importance sampling clipping 
+    gamma: float = 1.0 # Discount factor
+  ) -> chex.Array:
+    pi_action_prob = jnp.sum(transformed_policy * jnp.expand_dims(actions_oh, -3), axis=-1)
+    mu_action_prob = jnp.sum(sampling_policy * actions_oh, axis=-1)
+    importance_sampling = pi_action_prob / jnp.expand_dims(mu_action_prob, -2)
+    
+    p1_is = importance_sampling[..., 0, None]
+    p2_is = jnp.expand_dims(importance_sampling[..., 1], -2)
+    @chex.dataclass(frozen=True)
+    class StateVTraceCarry:
+      """The carry of the v-trace scan loop."""
+      next_state_value: chex.Array
+      next_state_delta_v: chex.Array
+      
+    init_carry = StateVTraceCarry(
+      next_state_value=jnp.zeros_like(v[-1]),
+      next_state_delta_v=jnp.zeros_like(v[-1])
+      
+    )
+    def _state_v_trace(carry: StateVTraceCarry, x) -> tuple[StateVTraceCarry, Any]:
+      (p1_is, p2_is, v, reward, valid) = x
+      
+      delta_v = jnp.minimum(rho, p1_is) * jnp.minimum(rho, p2_is) * (reward + gamma * carry.next_state_value - v)
+      
+      carry_delta_v = delta_v + lambda_ * jnp.minimum(c, p1_is) * jnp.minimum(c, p2_is) * gamma * carry.next_state_delta_v
+      
+      v_target = v + carry_delta_v
+      
+      reset_carry = init_carry
+      next_carry = StateVTraceCarry(
+        next_state_value=v,
+        next_state_delta_v=carry_delta_v
+      )
+      return tree_where(valid, (next_carry, v_target), (reset_carry, jnp.zeros_like(v_target)))
+    
+    _, v_target = lax.scan(
+      f=_state_v_trace,
+      init=init_carry,
+      xs=(p1_is, p2_is, v, jnp.expand_dims(reward, (-1, -2)), jnp.expand_dims(valid, (-1, -2))),
+      reverse=True
+    )
+    
+    return v_target
+  
+  def non_abstracted_mvs_loss(self, 
+                              mvs_params: Params,
+                              mvs_params_target: Params,
+                              policy_params: Params,
+                              transformation_params: tuple[Params, Params],
+                              abstraction_params: tuple[Params, Params],
+                              iset_encoder_params: tuple[Params, Params],
+                              timestep: TimeStep):
+    
+    return self.mvs_loss(mvs_params, mvs_params_target, policy_params, transformation_params, timestep.obs[..., 0, :], timestep.obs[..., 1, :], timestep)
+    
+  def abstracted_mvs_loss(self,
+                          mvs_params: Params,
+                          mvs_params_target: Params,
+                          policy_params: Params,
+                          transformation_params: tuple[Params, Params],
+                          abstraction_params: tuple[Params, Params],
+                          iset_encoder_params: tuple[Params, Params],
+                          timestep: TimeStep):
+    
+    
+    vectorized_abstraction = jax.vmap(self._jit_get_abstraction, in_axes=(None, None, 0, 0), out_axes=0)
+    
+    p1_current_iset = vectorized_abstraction(abstraction_params[0], iset_encoder_params[0], timestep.public_state, timestep.obs[..., 0, :])
+    p2_current_iset = vectorized_abstraction(abstraction_params[1], iset_encoder_params[1], timestep.public_state, timestep.obs[..., 1, :])
+
+    
+    return self.mvs_loss(mvs_params, mvs_params_target, policy_params, transformation_params, p1_current_iset, p2_current_iset, timestep)
+  
+  # TODO: This is only matrix-valued states now
+  def mvs_loss(self,
+               mvs_params: Params,
+               mvs_params_target: Params,
+               rnad_params: Params,
+               transformation_params: tuple[Params, Params],
+               p1_obs: chex.Array,
+               p2_obs: chex.Array,
+               timestep: TimeStep):
+    
+    vectorized_policy = jax.vmap(jax.vmap(self.rnad_network.apply, in_axes=(None, 0, 0), out_axes=0), in_axes=(None, -2, -2), out_axes=-2)
+    vectorized_transformation = jax.vmap(self.transformation_network.apply, in_axes=(None, 0), out_axes=0)
+    vectorized_mvs = jax.vmap(self.mvs_network.apply, in_axes=(None, 0, 0), out_axes=0)
+    pi, _, _, _ = vectorized_policy(rnad_params, timestep.obs, timestep.legal)
+    
+    
+    mvs = vectorized_mvs(mvs_params, p1_obs, p2_obs)
+    mvs_target = vectorized_mvs(mvs_params_target, p1_obs, p2_obs)
+    
+    p1_transformation_direction = vectorized_transformation(transformation_params[0], p1_obs)
+    p2_transformation_direction = vectorized_transformation(transformation_params[1], p2_obs)
+    
+
+    # Dimension [Trajectory, Batch, Transformation, Player, Ations]
+    transformation_direction = jnp.stack((p1_transformation_direction, p2_transformation_direction), axis=-2)
+    
+    
+    transformation_direction = normalize_direction_with_mask(transformation_direction, jnp.expand_dims(timestep.legal * timestep.valid[..., jnp.newaxis, jnp.newaxis], -3))
+    
+    transformation_direction = jnp.concatenate((transformation_direction, jnp.expand_dims(jnp.zeros_like(pi), -3)), -3)
+    
+    policy_transformations = jnp.expand_dims(pi, -3) + transformation_direction    
+    policy_transformations = jnp.maximum(policy_transformations, 1e-12) # To invalidate negative actions and zeros.
+    
+    # Invalid actions ?
+    policy_transformations = policy_transformations / jnp.sum(policy_transformations, axis=-1, keepdims=True)
+     
+    mvs_train_target = self.state_v_trace(mvs_target, pi, policy_transformations, timestep.action, timestep.valid, timestep.reward)
+    
+    # mask = timestep.valid[..., jnp.newaxis, jnp.newaxis]
+    loss_v = timestep.valid[..., jnp.newaxis, jnp.newaxis] * (mvs - lax.stop_gradient(mvs_train_target)) ** 2
+    normalization = jnp.sum(timestep.valid) * self.config.transformations 
+    loss_v = jnp.sum(loss_v) / (normalization + (normalization == 0))
+    
+    
+    return loss_v
+  
+  def abstraction_loss(self,
+                       abstraction_params: Params,
+                       iset_encoder_params: Params, 
+                       similarity_params: Params, 
+                       similarity_target: chex.Array,
+                       public_state: chex.Array,
+                       obs: chex.Array): 
     
     vectorized_abstraction = jax.vmap(self.abstraction_network.apply, in_axes=(None, 0), out_axes=0)
     vectorized_iset_encoder = jax.vmap(self.iset_encoder.apply, in_axes=(None, 0), out_axes=0) 
@@ -765,24 +1020,25 @@ class MuZero():
     similarity = vectorized_similarity(similarity_params, abstraction) 
     
     # This computed the kmeans loss and the iset loss. TODO: Add the weighted term to the pi/v distance
-    def _compute_soft_kmeans_loss(real, pred, probs):
-      cluster_difference = lax.stop_gradient(jnp.expand_dims(real, -2)) - pred
-      cluster_distance = jnp.linalg.norm(cluster_difference, axis=-1)
-      cluster_soft_assignement = jax.nn.softmax(-cluster_distance, axis=-1)
-      cluster_loss = jnp.sum(cluster_difference ** 2, axis=-1)
-      cluster_loss = jnp.sum(cluster_loss * cluster_soft_assignement, axis=-1)
-      iset_loss = optax.losses.softmax_cross_entropy_with_integer_labels(probs, jax.lax.stop_gradient(jnp.argmax(cluster_soft_assignement, axis=-1)))
-      return jnp.mean(cluster_loss) + jnp.mean(iset_loss)
     
-    return _compute_soft_kmeans_loss(pi_v, jnp.concatenate(similarity, -1), iset_probs) 
     
-  def non_abstracted_dynamics_loss(self, dynamics_params, timestep: TimeStep):
+    return _compute_soft_kmeans_loss_with_single(similarity_target, jnp.concatenate(similarity, -1), iset_probs) 
     
+  # The abstraction and iset params are just for consistency
+  def non_abstracted_dynamics_loss(self, 
+                                   dynamics_params: Params,
+                                   abstraction_params: tuple[Params, Params],
+                                   iset_encoder_params: tuple[Params, Params],
+                                   timestep: TimeStep):
     
     return self.dynamics_loss(dynamics_params, timestep.obs, timestep.action, timestep.valid, timestep.reward)
 
     
-  def abstracted_dynamics_loss(self, dynamics_params, abstraction_params, iset_encoder_params, timestep: TimeStep):
+  def abstracted_dynamics_loss(self,
+                               dynamics_params: Params, 
+                               abstraction_params: tuple[Params, Params], 
+                               iset_encoder_params: tuple[Params, Params], 
+                               timestep: TimeStep):
     
     vectorized_abstraction = jax.vmap(self._jit_get_abstraction, in_axes=(None, None, 0, 0), out_axes=0)
     
@@ -792,18 +1048,23 @@ class MuZero():
     return self.dynamics_loss(dynamics_params, jnp.stack([p1_current_iset, p2_current_iset], -2), timestep.action, timestep.valid, timestep.reward)
   
    
-  def dynamics_loss(self, dynamics_params, iset, action, valid, reward):
+  def dynamics_loss(self, 
+                    dynamics_params: Params,
+                    obs: chex.Array,
+                    action: chex.Array, 
+                    valid: chex.Array, 
+                    reward: chex.Array):
     
     non_terminal = lax.pad(valid, 0.0, [(0, 1, 0), (0, 0, 0)])[1:]
     reward = jnp.stack((reward, -reward), axis=-1)
     
     vectorized_dynamics = jax.vmap(self.dynamics_network.apply, in_axes=(None, 0, 0, 0, 0), out_axes=(0, 0, 0, 0))
     
-    next_p1_iset, next_p2_iset, next_reward, is_terminal = vectorized_dynamics(dynamics_params, iset[..., 0, :], iset[..., 1, :], action[..., 0, :], action[..., 1, :]) 
+    next_p1_iset, next_p2_iset, next_reward, is_terminal = vectorized_dynamics(dynamics_params, obs[..., 0, :], obs[..., 1, :], action[..., 0, :], action[..., 1, :]) 
     
     next_state = jnp.stack((next_p1_iset, next_p2_iset), axis=-2)
     
-    real_next_state = jnp.roll(iset, shift=-1, axis=0)
+    real_next_state = jnp.roll(obs, shift=-1, axis=0)
     
     
     dynamics_normalization = jnp.sum(non_terminal)
@@ -827,24 +1088,30 @@ class MuZero():
     optimizers: Optimizers,
     timestep: TimeStep,
     alpha: float,
-    update_net, 
+    update_net: bool, 
   ):
+    vectorized_net_apply = jax.vmap(jax.vmap(self.rnad_network.apply, in_axes=(None, 0, 0), out_axes=0), in_axes=(None, -2, -2), out_axes=-2)
+    
+    pi_before_train, _, _, _ = vectorized_net_apply(network_parameters.rnad_params, timestep.obs, timestep.legal) 
     
     loss, grad = self._rnad_loss(network_parameters.rnad_params, network_parameters.rnad_params_target, network_parameters.rnad_params_prev, network_parameters.rnad_params_prev_, timestep, alpha)
-    
-    
     
     rnad_params = optimizers.rnad_optimizer(network_parameters.rnad_params, grad)
     
     rnad_params_target = optimizers.rnad_optimizer_target(
         network_parameters.rnad_params_target, jax.tree.map(lambda a, b: a - b, network_parameters.rnad_params_target, rnad_params))
     
+    rnad_params_prev, rnad_params_prev_ = jax.lax.cond(
+        update_net,
+        lambda: (rnad_params_target, network_parameters.rnad_params_prev),
+        lambda: (network_parameters.rnad_params_prev, network_parameters.rnad_params_prev_))
     
-    vectorized_net_apply = jax.vmap(jax.vmap(self.rnad_network.apply, in_axes=(None, 0, 0), out_axes=0), in_axes=(None, 1, 1), out_axes=1)
     # v will not be used in future! Here it contains the regularized value functio
-    pi, v, _, _ = vectorized_net_apply(network_parameters.rnad_params, timestep.obs, timestep.legal)
+    pi, v, _, _ = vectorized_net_apply(rnad_params, timestep.obs, timestep.legal)
     pi_v = jnp.concatenate((pi, v), axis=-1)
+    
     abs_grad = []
+    transform_grad = []
     for pl in range(2):
       abstraction_loss, abstraction_grad = self._abstraction_loss(
         network_parameters.abstraction_params[pl], 
@@ -853,35 +1120,58 @@ class MuZero():
         jax.lax.stop_gradient(pi_v[..., pl, :]), 
         timestep.public_state, 
         timestep.obs[..., pl, :])
+      transformation_loss, transformation_grad = self._transformation_loss(
+        network_parameters.transformation_params[pl],
+        network_parameters.abstraction_params[pl], 
+        network_parameters.iset_encoder_params[pl], 
+        pi_before_train[..., pl, :], 
+        pi[..., pl, :],
+        timestep.public_state,
+        timestep.obs[..., pl, :],
+        timestep.legal[..., pl, :],
+        timestep.valid
+      )
       
-      # abstraction_loss, abstraction_grad = self._abstraction_loss(abstraction_params[pl], iset_encoder_params[pl], similarity_params[pl], jnp.concatenate([timestep.legal[..., 0, :], jnp.zeros_like(jnp.squeeze(v)[..., :1])], -1), timestep.public_state, timestep.obs[..., pl, :])
       abs_grad.append(abstraction_grad)
+      transform_grad.append(transformation_grad)
     
     abstraction_params = (*[optimizers.abstraction_optimizer[pl](network_parameters.abstraction_params[pl], abs_grad[pl][0]) for pl in range(2)],)
     iset_encoder_params = (*[optimizers.iset_encoder_optimizer[pl](network_parameters.iset_encoder_params[pl], abs_grad[pl][1]) for pl in range(2)],)
     similarity_params = (*[optimizers.similarity_optimizer[pl](network_parameters.similarity_params[pl], abs_grad[pl][2]) for pl in range(2)],)
     
-    
+    transformation_params = (*[optimizers.transformation_opitimizer[pl](network_parameters.transformation_params[pl], transform_grad[pl]) for pl in range(2)],)
     # dynamics_loss, dynamics_grad = self._dynamics_loss(dynamics_params, timestep)
+    
+    mvs_loss, mvs_grad = self._mvs_loss(
+      network_parameters.mvs_params,
+      network_parameters.mvs_params_target,
+      rnad_params_target,
+      transformation_params,
+      abstraction_params,
+      iset_encoder_params,
+      timestep
+    )
+    
+    mvs_params = optimizers.mvs_optimizer(network_parameters.mvs_params, mvs_grad)
+    mvs_params_target = optimizers.mvs_optimizer_target(network_parameters.mvs_params_target, jax.tree.map(lambda a, b: a - b, network_parameters.mvs_params_target, mvs_params))
     
     dynamics_loss, dynamics_grad = self._dynamics_loss(
       network_parameters.dynamics_params, 
-      network_parameters.abstraction_params,
-      network_parameters.iset_encoder_params,
+      abstraction_params,
+      iset_encoder_params,
       timestep)
     
     dynamics_params = optimizers.dynamics_optimizer(network_parameters.dynamics_params, dynamics_grad)
     
-    rnad_params_prev, rnad_params_prev_ = jax.lax.cond(
-        update_net,
-        lambda: (rnad_params_target, network_parameters.rnad_params_prev),
-        lambda: (network_parameters.rnad_params_prev, network_parameters.rnad_params_prev_))
     
     return NetworkParameters(
       rnad_params=rnad_params,
       rnad_params_target=rnad_params_target,
       rnad_params_prev=rnad_params_prev,
       rnad_params_prev_=rnad_params_prev_,
+      mvs_params=mvs_params,
+      mvs_params_target=mvs_params_target,
+      transformation_params=transformation_params,
       abstraction_params=abstraction_params,
       iset_encoder_params=iset_encoder_params,
       similarity_params=similarity_params,
@@ -1116,11 +1406,10 @@ def main():
   
   game = JaxOriginalGoofspiel(cards, points_order)
   
-  # game = orig_game
-   
+  # game = orig_game 
   mu = True
   if mu == True:
-    muzero = MuZero(game, MuZeroConfig(batch_size=32, trajectory_max=cards-1))
+    muzero = MuZero(game, MuZeroConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=True))
     # muzero.rng_key = jax.random.PRNGKey(42)
   else:
     params = [(n, p) for n, p in params.items()]
@@ -1128,6 +1417,7 @@ def main():
   
   # profiler = Profiler()
   # profiler.start()
+  # with chex.fake_jit():
   for _ in range(600):
     muzero.goofspiel_step()
      
