@@ -304,20 +304,25 @@ class MuZero():
     assert config.matrix_valued_states, "Multi-valued states are not implemented."
     self.config = config
     self.game = game
-    self.actions = game.num_distinct_actions()
+    
+    if isinstance(self.game, JaxOriginalGoofspiel):
+      print("Warning: you use Jax Goofspiel, so you need to use domain specific goofspiel_step method")
+      
+    self.init()
+    
+  def init(self):
+    self.actions = self.game.num_distinct_actions()
     
     if self.config.use_abstraction:
-      self.obs = config.abstraction_size
+      self.obs = self.config.abstraction_size
     else:
-      self.obs = game.information_state_tensor_shape()
+      self.obs = self.game.information_state_tensor_shape()
       
     self.rng_key = jax.random.PRNGKey(self.config.seed)
     
-    if isinstance(game, JaxOriginalGoofspiel):
-      print("Warning: you use Jax Goofspiel, so you need to use domain specific goofspiel_step method")
     # temp_keys = self.get_next_rng_keys(6)
     
-    self.example_state  = game.new_initial_state()
+    self.example_state  = self.game.new_initial_state()
     self.example_timestep = self.default_timestep()
     self.example_obs = np.ones((1, self.obs))
     
@@ -1293,6 +1298,42 @@ class MuZero():
       policy.action_probability_array[policy.state_lookup[iset]] = pi[i]
   
     return policy
+  
+  def __getstate__(self):
+    return dict(
+      config=self.config,
+      game = self.game, # TODO: If using pyspiel game, this probably breaks
+      learner_steps = self.learner_steps,
+      
+      rngkey = self.rng_key,
+      
+      network_parameters = self.network_parameters,
+      optimizers = jax.tree_map(lambda x: x.state, self.optimizers, is_leaf=lambda x: hasattr(x, 'state')), 
+    )
+    
+  def __setstate__(self, state):
+    self.config = state['config']
+    self.game = state['game']
+    self.init()
+    
+    self.learner_steps = state['learner_steps']
+    
+    self.rng_key = state['rngkey']
+    
+    self.network_parameters = state['network_parameters']
+    # Can you do this better?
+    self.optimizers.rnad_optimizer.state = state["optimizers"].rnad_optimizer
+    self.optimizers.rnad_optimizer_target.state = state["optimizers"].rnad_optimizer_target
+    self.optimizers.mvs_optimizer.state = state["optimizers"].mvs_optimizer
+    self.optimizers.mvs_optimizer_target.state = state["optimizers"].mvs_optimizer_target
+    self.optimizers.dynamics_optimizer.state = state["optimizers"].dynamics_optimizer
+    for pl in range(2):
+      self.optimizers.transformation_opitimizer[pl].state = state["optimizers"].transformation_opitimizer[pl]
+      self.optimizers.abstraction_optimizer[pl].state = state["optimizers"].abstraction_optimizer[pl]
+      self.optimizers.iset_encoder_optimizer[pl].state = state["optimizers"].iset_encoder_optimizer[pl]
+      self.optimizers.similarity_optimizer[pl].state = state["optimizers"].similarity_optimizer[pl]
+    
+     
 
 
 def compare_legals(muzero, game):
@@ -1415,10 +1456,11 @@ def main():
     params = [(n, p) for n, p in params.items()]
     muzero = RNaDSolver(RNaDConfig(game_name="goofspiel", game_params=params, trajectory_max=cards-1, batch_size=32))
   
+  
   # profiler = Profiler()
   # profiler.start()
   # with chex.fake_jit():
-  for _ in range(600):
+  for _ in range(50000):
     muzero.goofspiel_step()
      
   # goofspiel_compare_learned_trees(muzero, game, orig_game)
