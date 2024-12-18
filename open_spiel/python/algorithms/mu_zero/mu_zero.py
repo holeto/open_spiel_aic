@@ -200,6 +200,7 @@ class MuZeroConfig:
   batch_size: int = 32
   
   trajectory_max: int = 6
+  sampling_epsilon: float = 0.0
   
   use_abstraction: bool = False
   abstraction_amount: int = 10
@@ -214,6 +215,12 @@ class MuZeroConfig:
   transformations: int = 10
   matrix_valued_states: bool = True
   
+  c_iset_vtrace: float = 1.0
+  rho_iset_vtrace: float = np.inf
+  c_state_vtrace: float = 1.0
+  rho_state_vtrace: float = np.inf
+  
+  eta_regularization: float = 0.2
   entropy_schedule_repeats: Sequence[int] = (1,)
   entropy_schedule_size: Sequence[int] = (2000,)
   
@@ -516,6 +523,9 @@ class MuZero():
     p2_abstraction_iset = self._jit_get_abstraction(self.network_parameters.abstraction_params[1], self.network_parameters.iset_encoder_params[1], public_state, p2_iset)
     return p1_abstraction_iset, p2_abstraction_iset
   
+  def get_non_abstracted_next_state(self, public_state, p1_iset, p2_iset, p1_action, p2_action):
+    return self._jit_get_next_state(self.network_parameters.dynamics_params, p1_iset, p2_iset, p1_action, p2_action)
+  
   # Expects isets in the original game definition and action as a index of the action
   def get_next_state(self, public_state, p1_iset, p2_iset, p1_action, p2_action):
     p1_abstraction_iset, p2_abstraction_iset = self.get_both_abstraction(public_state, p1_iset, p2_iset)
@@ -524,6 +534,9 @@ class MuZero():
   def get_legal_actions(self, public_state, obs, pl): 
     assert False, "Do not call this method, it is here only because of the older PoC version."
     return self._jit_get_legal_actions(self.network_parameters.abstraction_params[pl], self.network_parameters.iset_encoder_params[pl], self.network_parameters.legal_params[pl], public_state, obs)
+  
+  def get_mvs(self, p1_iset, p2_iset):
+    return self.mvs_network.apply(self.network_parameters.mvs_params_target, p1_iset, p2_iset)
   
   # Expects obs and legal to be in shape [Batch, Player, ...]
   def batch_policy_and_action(self, obs, legal):
@@ -663,6 +676,9 @@ class MuZero():
       _, p1_iset, p2_iset, public_state = vectorized_get_info(carry.point_cards, carry.played_cards, carry.p1_points)
       obs = jnp.stack((p1_iset, p2_iset), axis=1)
       pi = network_apply(params, obs, carry.legal_actions)
+      random_pi = carry.legal_actions / jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
+      pi = self.config.sampling_epsilon * random_pi + (1 - self.config.sampling_epsilon) * pi
+      # pi = carry.legal_actions / jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
       action, action_oh = vectorized_sample_action(key, pi)
       next_legal, next_rewards, next_point_cards, next_played_cards, next_p1_points = vectorized_apply_action(carry.point_cards, carry.played_cards, carry.p1_points, turn, action)
       new_carry = SampleTrajectoryCarry(
@@ -714,7 +730,7 @@ class MuZero():
     reward: chex.Array, # Still not regularized
     lambda_: float = 1.0, # Lambda parameter for V-trace
     c: float = 1.0, # Importance sampling clipping
-    rho: float = 1.0, # Importance sampling clipping
+    rho: float = np.inf, # Importance sampling clipping
     eta: float = 0.2, # Regularization factor 
     gamma: float = 1.0 # Discount factor
   ):
@@ -758,6 +774,7 @@ class MuZero():
       v_target = v + carry_delta_v
       
       # TODO: Shall we use opponent entropy reg term or entropy of played action?
+      
       q_value = v + weighted_regularization_term  + action_oh * inverted_sampling  *(q_reward + gamma * importance_sampling * (carry.next_value + carry.delta_v) - v )
       
       next_carry = VTraceCarry(
@@ -808,7 +825,7 @@ class MuZero():
     
     expanded_valid = jnp.expand_dims(timestep.valid, (-2, -1))
     
-    v_train_target, q_value = self.v_trace(v_target, expanded_valid, timestep.policy, pi, regularized_term, timestep.action, timestep.reward)
+    v_train_target, q_value = self.v_trace(v_target, expanded_valid, timestep.policy, pi, regularized_term, timestep.action, timestep.reward, c=self.config.c_iset_vtrace, rho=self.config.rho_iset_vtrace, eta=self.config.eta_regularization)
     
     # We multiply by 2, since each player acts
     normalization = jnp.sum(timestep.valid) * 2 
@@ -996,7 +1013,7 @@ class MuZero():
     # Invalid actions ?
     policy_transformations = policy_transformations / jnp.sum(policy_transformations, axis=-1, keepdims=True)
      
-    mvs_train_target = self.state_v_trace(mvs_target, pi, policy_transformations, timestep.action, timestep.valid, timestep.reward)
+    mvs_train_target = self.state_v_trace(mvs_target, pi, policy_transformations, timestep.action, timestep.valid, timestep.reward, c=self.config.c_state_vtrace, rho=self.config.rho_state_vtrace)
     
     # mask = timestep.valid[..., jnp.newaxis, jnp.newaxis]
     loss_v = timestep.valid[..., jnp.newaxis, jnp.newaxis] * (mvs - lax.stop_gradient(mvs_train_target)) ** 2
@@ -1079,13 +1096,128 @@ class MuZero():
     dynamics_loss = jnp.sum(dynamics_loss ** 2) / (dynamics_normalization + (dynamics_normalization == 0))
     
     reward_loss = ((lax.stop_gradient(reward) - next_reward) ** 2) * valid[..., None]
-    reward_loss = jnp.sum(reward_loss) / (normalization + (normalization == 0))
+    reward_loss =  10 * jnp.sum(reward_loss) / (normalization + (normalization == 0))
     
     terminal_loss = optax.sigmoid_binary_cross_entropy(jnp.squeeze(is_terminal),  lax.stop_gradient(1 - non_terminal)) * valid
     terminal_loss = jnp.sum(terminal_loss) / (normalization + (normalization == 0))
     
+    # return reward_loss + terminal_loss
     return dynamics_loss + reward_loss + terminal_loss
       
+      
+  def update_rnad(
+    self,
+    rnad_params: Params,
+    rnad_params_target: Params,
+    rnad_params_prev: Params,
+    rnad_params_prev_: Params,
+    optimizers: Optimizers,
+    timestep: TimeStep,
+    alpha: float,
+    update_net: bool 
+  ):
+    loss, grad = self._rnad_loss(rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, timestep, alpha)
+    
+    rnad_params = optimizers.rnad_optimizer(rnad_params, grad)
+    
+    rnad_params_target = optimizers.rnad_optimizer_target(
+        rnad_params_target, jax.tree.map(lambda a, b: a - b, rnad_params_target, rnad_params))
+    
+    rnad_params_prev, rnad_params_prev_ = jax.lax.cond(
+        update_net,
+        lambda: (rnad_params_target, rnad_params_prev),
+        lambda: (rnad_params_prev, rnad_params_prev_))
+    return rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers
+      
+  def update_abstraction(
+    self,
+    abstraction_params: tuple[Params, Params],
+    iset_encoder_params: tuple[Params, Params],
+    similarity_params: tuple[Params, Params],
+    optimizers: Optimizers,
+    similarity: chex.Array, # Expects to have 2nd to last dimension for playe
+    timestep: TimeStep,
+  ):
+    abs_grad = []
+    for pl in range(2):
+      abstraction_loss, abstraction_grad = self._abstraction_loss(
+        abstraction_params[pl], 
+        iset_encoder_params[pl], 
+        similarity_params[pl], 
+        jax.lax.stop_gradient(similarity[..., pl, :]), 
+        timestep.public_state, 
+        timestep.obs[..., pl, :])
+       
+      
+      abs_grad.append(abstraction_grad)
+    
+    abstraction_params = (*[optimizers.abstraction_optimizer[pl](abstraction_params[pl], abs_grad[pl][0]) for pl in range(2)],)
+    iset_encoder_params = (*[optimizers.iset_encoder_optimizer[pl](iset_encoder_params[pl], abs_grad[pl][1]) for pl in range(2)],)
+    similarity_params = (*[optimizers.similarity_optimizer[pl](similarity_params[pl], abs_grad[pl][2]) for pl in range(2)],)
+    
+    return abstraction_params, iset_encoder_params, similarity_params, optimizers
+    
+  def update_mvs_with_transformations(
+    self,
+    mvs_params: Params,
+    mvs_params_target: Params,
+    transformation_params: tuple[Params, Params],
+    policy_params: Params,
+    abstraction_params: tuple[Params, Params],
+    iset_encoder_params: tuple[Params, Params],
+    optimizers: Optimizers,
+    pi_before_train: chex.Array,
+    pi_after_train: chex.Array,
+    timestep: TimeStep,
+    
+  ):
+    transform_grad = []
+    for pl in range(2): 
+      transformation_loss, transformation_grad = self._transformation_loss(
+        transformation_params[pl],
+        abstraction_params[pl], 
+        iset_encoder_params[pl], 
+        pi_before_train[..., pl, :], 
+        pi_after_train[..., pl, :],
+        timestep.public_state,
+        timestep.obs[..., pl, :],
+        timestep.legal[..., pl, :],
+        timestep.valid
+      )
+       
+      transform_grad.append(transformation_grad)
+     
+    transformation_params = (*[optimizers.transformation_opitimizer[pl](transformation_params[pl], transform_grad[pl]) for pl in range(2)],)
+    
+    mvs_loss, mvs_grad = self._mvs_loss(
+      mvs_params,
+      mvs_params_target,
+      policy_params,
+      transformation_params,
+      abstraction_params,
+      iset_encoder_params,
+      timestep
+    )
+    
+    mvs_params = optimizers.mvs_optimizer(mvs_params, mvs_grad)
+    mvs_params_target = optimizers.mvs_optimizer_target(mvs_params_target, jax.tree.map(lambda a, b: a - b, mvs_params_target, mvs_params))
+    
+    return mvs_params, mvs_params_target, transformation_params, optimizers
+  
+  def update_dynamics(
+    self,
+    dynamics_params: Params,
+    abstraction_params: tuple[Params, Params],
+    iset_encoder_params: tuple[Params, Params],
+    optimizers: Optimizers,
+    timestep: TimeStep
+  ):
+    dynamics_loss, dynamics_grad = self._dynamics_loss(dynamics_params, abstraction_params, iset_encoder_params, timestep)
+    
+    dynamics_params = optimizers.dynamics_optimizer(dynamics_params, dynamics_grad)
+    
+    return dynamics_params, optimizers
+  
   @functools.partial(jax.jit, static_argnums=(0,))
   def update_parameters(
     self,
@@ -1099,74 +1231,49 @@ class MuZero():
     
     pi_before_train, _, _, _ = vectorized_net_apply(network_parameters.rnad_params, timestep.obs, timestep.legal) 
     
-    loss, grad = self._rnad_loss(network_parameters.rnad_params, network_parameters.rnad_params_target, network_parameters.rnad_params_prev, network_parameters.rnad_params_prev_, timestep, alpha)
-    
-    rnad_params = optimizers.rnad_optimizer(network_parameters.rnad_params, grad)
-    
-    rnad_params_target = optimizers.rnad_optimizer_target(
-        network_parameters.rnad_params_target, jax.tree.map(lambda a, b: a - b, network_parameters.rnad_params_target, rnad_params))
-    
-    rnad_params_prev, rnad_params_prev_ = jax.lax.cond(
-        update_net,
-        lambda: (rnad_params_target, network_parameters.rnad_params_prev),
-        lambda: (network_parameters.rnad_params_prev, network_parameters.rnad_params_prev_))
+    rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers = self.update_rnad(
+      network_parameters.rnad_params, 
+      network_parameters.rnad_params_target,
+      network_parameters.rnad_params_prev,
+      network_parameters.rnad_params_prev_,
+      optimizers,
+      timestep,
+      alpha,
+      update_net
+    )
     
     # v will not be used in future! Here it contains the regularized value functio
     pi, v, _, _ = vectorized_net_apply(rnad_params, timestep.obs, timestep.legal)
     pi_v = jnp.concatenate((pi, v), axis=-1)
     
-    abs_grad = []
-    transform_grad = []
-    for pl in range(2):
-      abstraction_loss, abstraction_grad = self._abstraction_loss(
-        network_parameters.abstraction_params[pl], 
-        network_parameters.iset_encoder_params[pl], 
-        network_parameters.similarity_params[pl], 
-        jax.lax.stop_gradient(pi_v[..., pl, :]), 
-        timestep.public_state, 
-        timestep.obs[..., pl, :])
-      transformation_loss, transformation_grad = self._transformation_loss(
-        network_parameters.transformation_params[pl],
-        network_parameters.abstraction_params[pl], 
-        network_parameters.iset_encoder_params[pl], 
-        pi_before_train[..., pl, :], 
-        pi[..., pl, :],
-        timestep.public_state,
-        timestep.obs[..., pl, :],
-        timestep.legal[..., pl, :],
-        timestep.valid
-      )
-      
-      abs_grad.append(abstraction_grad)
-      transform_grad.append(transformation_grad)
-    
-    abstraction_params = (*[optimizers.abstraction_optimizer[pl](network_parameters.abstraction_params[pl], abs_grad[pl][0]) for pl in range(2)],)
-    iset_encoder_params = (*[optimizers.iset_encoder_optimizer[pl](network_parameters.iset_encoder_params[pl], abs_grad[pl][1]) for pl in range(2)],)
-    similarity_params = (*[optimizers.similarity_optimizer[pl](network_parameters.similarity_params[pl], abs_grad[pl][2]) for pl in range(2)],)
-    
-    transformation_params = (*[optimizers.transformation_opitimizer[pl](network_parameters.transformation_params[pl], transform_grad[pl]) for pl in range(2)],)
-    # dynamics_loss, dynamics_grad = self._dynamics_loss(dynamics_params, timestep)
-    
-    mvs_loss, mvs_grad = self._mvs_loss(
-      network_parameters.mvs_params,
-      network_parameters.mvs_params_target,
-      rnad_params_target,
-      transformation_params,
-      abstraction_params,
-      iset_encoder_params,
+    abstraction_params, iset_encoder_params, similarity_params, optimizers = self.update_abstraction(
+      network_parameters.abstraction_params,
+      network_parameters.iset_encoder_params,
+      network_parameters.similarity_params,
+      optimizers,
+      pi_v,
       timestep
     )
     
-    mvs_params = optimizers.mvs_optimizer(network_parameters.mvs_params, mvs_grad)
-    mvs_params_target = optimizers.mvs_optimizer_target(network_parameters.mvs_params_target, jax.tree.map(lambda a, b: a - b, network_parameters.mvs_params_target, mvs_params))
-    
-    dynamics_loss, dynamics_grad = self._dynamics_loss(
-      network_parameters.dynamics_params, 
+    mvs_params, mvs_params_target, transformation_params, optimizers = self.update_mvs_with_transformations(
+      network_parameters.mvs_params,
+      network_parameters.mvs_params_target,
+      network_parameters.transformation_params,
+      rnad_params,
       abstraction_params,
       iset_encoder_params,
-      timestep)
+      optimizers,
+      pi_before_train,
+      pi,
+      timestep
+    )
     
-    dynamics_params = optimizers.dynamics_optimizer(network_parameters.dynamics_params, dynamics_grad)
+    dynamics_params, optimizers = self.update_dynamics(
+      network_parameters.dynamics_params,
+      abstraction_params,
+      iset_encoder_params,
+      optimizers,
+      timestep)
     
     
     return NetworkParameters(
@@ -1226,6 +1333,10 @@ class MuZero():
     
     self.learner_steps +=1
     
+  def multiple_goofspiel_steps(self, iter: int):
+    for _ in range(iter):
+      self.goofspiel_step()
+      
     
     
   # Extract policy only in small games!
@@ -1450,38 +1561,38 @@ def main():
   # game = orig_game 
   mu = True
   if mu == True:
-    muzero = MuZero(game, MuZeroConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=True))
+    muzero = MuZero(game, MuZeroConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=True, sampling_epsilon=0.0))
     # muzero.rng_key = jax.random.PRNGKey(42)
   else:
     params = [(n, p) for n, p in params.items()]
     muzero = RNaDSolver(RNaDConfig(game_name="goofspiel", game_params=params, trajectory_max=cards-1, batch_size=32))
   
   
-  # profiler = Profiler()
-  # profiler.start()
+  profiler = Profiler()
+  profiler.start()
   # with chex.fake_jit():
-  for _ in range(50000):
+  for _ in range(3000):
     muzero.goofspiel_step()
      
   # goofspiel_compare_learned_trees(muzero, game, orig_game)
   # print("Ee")
   # compare_legals(muzero, game)
-  # profiler.stop()
-  # print(profiler.output_text(color=True, unicode=True))
+  profiler.stop()
+  print(profiler.output_text(color=True, unicode=True))
   
   # policy = muzero.extract_full_policy()
      
-  policy = muzero.extract_goofspiel_policy(orig_game)
+  # policy = muzero.extract_goofspiel_policy(orig_game)
   
-  # print(policy.action_probabilities(state, 0))
-  # print(policy.action_probabilities(state, 1))
-  # print(state.information_state_tensor(0))
-  # print(state.information_state_tensor(1))
-  # # print(exploitability(game, policy))
-  br1 = BestResponsePolicy(orig_game, 0, policy)
-  br2 = BestResponsePolicy(orig_game, 1, policy)
-  print(br1.value(orig_game.new_initial_state()))
-  print(br2.value(orig_game.new_initial_state()))
+  # # print(policy.action_probabilities(state, 0))
+  # # print(policy.action_probabilities(state, 1))
+  # # print(state.information_state_tensor(0))
+  # # print(state.information_state_tensor(1))
+  # # # print(exploitability(game, policy))
+  # br1 = BestResponsePolicy(orig_game, 0, policy)
+  # br2 = BestResponsePolicy(orig_game, 1, policy)
+  # print(br1.value(orig_game.new_initial_state()))
+  # print(br2.value(orig_game.new_initial_state()))
   
   # traj = muzero.sample_trajectories()
   # print(traj.action.shape)
