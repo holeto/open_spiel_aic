@@ -17,6 +17,8 @@ import flax.linen as nn
 import chex
 import optax
 
+from enum import Enum
+
 import numpy as np
 
 import pyspiel
@@ -44,6 +46,8 @@ class TimeStep():
 class Optimizers:
   rnad_optimizer: Optimizer = ()
   rnad_optimizer_target: Optimizer = ()
+  expected_optimizer: Optimizer = ()
+  expected_optimizer_target: Optimizer = ()
   mvs_optimizer: Optimizer = ()
   mvs_optimizer_target: Optimizer = ()
   transformation_opitimizer: Sequence[Optimizer] = () 
@@ -58,6 +62,8 @@ class NetworkParameters:
   rnad_params_target: Params = ()
   rnad_params_prev: Params = ()
   rnad_params_prev_: Params = ()
+  expected_params: Params = ()
+  expected_params_target: Params = ()
   mvs_params: Params = ()
   mvs_params_target: Params = ()
   transformation_params: Sequence[Params] = () 
@@ -80,9 +86,8 @@ class SimilarityNetwork(nn.Module):
     x = nn.relu(x)
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
-    pi = nn.Dense(self.out_dim)(x)
-    v = nn.Dense(1)(x)
-    return pi, v
+    x = nn.Dense(self.out_dim)(x)
+    return x
 
 # TODO: This may be better to output public state and indices of isets, but who knows
 class DynamicsNetwork(nn.Module):
@@ -109,7 +114,7 @@ class InfosetEncoder(nn.Module):
   isets: int
   
   @nn.compact
-  def __call__(self, x) -> Any:
+  def __call__(self, x: chex.Array) -> Any:
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
     x = nn.Dense(self.hidden_size)(x)
@@ -123,7 +128,7 @@ class PublicStateEncoder(nn.Module):
   isets: int
   
   @nn.compact
-  def __call__(self, x) -> Any:
+  def __call__(self, x: chex.Array) -> chex.Array:
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
     x = nn.Dense(self.hidden_size)(x)
@@ -139,7 +144,7 @@ class LegalActionsNetwork(nn.Module):
   
   
   @nn.compact
-  def __call__(self, x: chex.Array) -> Any:
+  def __call__(self, x: chex.Array) -> chex.Array:
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
     x = nn.Dense(self.hidden_size)(x)
@@ -154,7 +159,7 @@ class TransformationNetwork(nn.Module):
   actions: int
   
   @nn.compact
-  def __call__(self, x: chex.Array) -> Any:
+  def __call__(self, x: chex.Array) -> chex.Array:
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
     x = nn.Dense(self.hidden_size)(x)
@@ -168,7 +173,7 @@ class MAVSNetwork(nn.Module):
   values: int 
   
   @nn.compact
-  def __call__(self, p1_iset: chex.Array, p2_iset: chex.Array) -> Any:
+  def __call__(self, p1_iset: chex.Array, p2_iset: chex.Array) -> chex.Array:
     x = jnp.concatenate((p1_iset, p2_iset), axis=-1)
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
@@ -184,7 +189,7 @@ class MUVSNetwork(nn.Module):
   p2_values: int
   
   @nn.compact
-  def __call__(self, p1_iset: chex.Array, p2_iset: chex.Array) -> Any:
+  def __call__(self, p1_iset: chex.Array, p2_iset: chex.Array) -> chex.Array:
     x = jnp.concatenate((p1_iset, p2_iset), axis=-1)
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
@@ -194,6 +199,26 @@ class MUVSNetwork(nn.Module):
     x = jnp.squeeze(x.reshape((-1, 2, self.values)))
     return x
  
+class ExpectedNetwork(nn.Module):
+  hidden_size: int 
+  
+  
+  @nn.compact
+  def __call__(self, p1_iset: chex.Array, p2_iset: chex.Array) -> chex.Array:
+    x = jnp.concatenate((p1_iset, p2_iset), axis=-1)
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    x = nn.Dense(1)(x)
+    return x
+ 
+class SimilarityMetric(str, Enum):
+  POLICY = "policy"
+  VALUE = "value"
+  POLICY_VALUE = "policy_value"
+  LEGAL_ACTIONS = "legal_actions"
+ 
 @chex.dataclass(frozen=True)
 class MuZeroConfig: 
   
@@ -202,9 +227,16 @@ class MuZeroConfig:
   trajectory_max: int = 6
   sampling_epsilon: float = 0.0
   
+  train_rnad: bool = True
+  train_mvs: bool = True
+  train_abstraction: bool = True
+  train_dynamics: bool = True
+  
+  
   use_abstraction: bool = False
   abstraction_amount: int = 10
   abstraction_size: int = 32
+  similarity_metric: SimilarityMetric = SimilarityMetric.POLICY_VALUE
   
   ps_hidden_size: int = 128
   iset_hidden_size: int = 64
@@ -267,7 +299,7 @@ def neurd_loss(
   clip: float=10_000,
   threshold: float=2.0
 ):
-  advantage = q_values - jnp.sum(policy * logits, axis=-1, keepdims=True)
+  advantage = q_values - jnp.sum(policy * q_values, axis=-1, keepdims=True)
   advantage = advantage * importance_sampling
   advantage = lax.stop_gradient(jnp.clip(advantage, -clip, clip))
   mean_logit = jnp.sum(logits * legal, axis=-1, keepdims=True) / jnp.sum(legal, axis=-1, keepdims=True)
@@ -290,19 +322,24 @@ def normalize_direction_with_mask(x:chex.Array, mask:chex.Array) -> chex.Array:
   return jnp.where(norm < 1e-15, x, x / norm)
 
 # TODO: This should take valid into account
-def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: chex.Array):
+def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: chex.Array, temperature: float=1.0):
   # The predicted dimension is missing
   chex.assert_shape((real,), (*pred.shape[:-2], pred.shape[-1]))
   cluster_difference = lax.stop_gradient(jnp.expand_dims(real, -2)) - pred
   cluster_distance = jnp.linalg.norm(cluster_difference, axis=-1)
-  cluster_soft_assignement = jax.nn.softmax(-cluster_distance, axis=-1)
+  cluster_soft_assignement = jax.nn.softmax(-cluster_distance * temperature, axis=-1)
   cluster_loss = jnp.sum(cluster_difference ** 2, axis=-1)
   cluster_loss = jnp.sum(cluster_loss * cluster_soft_assignement, axis=-1)
   return jnp.mean(cluster_loss), cluster_soft_assignement
   
 def _compute_soft_kmeans_loss_with_single(real, pred, probs):
-  cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred)
-  prob_loss = optax.losses.softmax_cross_entropy_with_integer_labels(probs, jax.lax.stop_gradient(jnp.argmax(cluster_soft_assignement, axis=-1)))
+  cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred, 1.0)
+  prob_loss = optax.losses.softmax_cross_entropy(probs,  jax.lax.stop_gradient(cluster_soft_assignement))
+  # labels = jnp.argmax(cluster_soft_assignement, axis=-1)
+  # smoothed_labels = jax.nn.one_hot(jnp.argmax(probs, axis=-1), probs.shape[-1])
+  # smoothed_labels = optax.smooth_labels(smoothed_labels, 0.1)
+  
+  # prob_loss = optax.losses.softmax_cross_entropy_with_integer_labels(probs, jax.lax.stop_gradient(jnp.argmax(cluster_soft_assignement, axis=-1)))
   return cluster_loss + jnp.mean(prob_loss)
 
 # This contains RNaD implementation. Note that this implementation is specific for two-player zero-sum games. Unlike the open_spiel RNaD that can be used to general-sum multiplayer games.
@@ -340,7 +377,7 @@ class MuZero():
     self.rnad_network = RNaDNework(self.config.rnad_hidden_size, self.actions)
     self.abstraction_network = PublicStateEncoder(self.config.ps_hidden_size, self.config.abstraction_size, self.config.abstraction_amount)
     self.iset_encoder = InfosetEncoder(self.config.iset_hidden_size, self.config.abstraction_amount)
-    self.similarity_network = SimilarityNetwork(self.config.iset_hidden_size, self.actions)
+    self.similarity_network = SimilarityNetwork(self.config.iset_hidden_size, self.similarity_output_size())
     # self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.example_timestep.obs.shape[-1])
     self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.obs)
     
@@ -373,7 +410,7 @@ class MuZero():
     optimizer = optax_optimizer(params, optax.chain(optax.adam(self.config.learning_rate, b1=0.0), optax.clip(100)))
     optimizer_target = optax_optimizer(params_target, optax.sgd(self.config.target_network_update))
     
-    temp_keys = self.get_next_rng_keys(10)
+    temp_keys = self.get_next_rng_keys(11)
     
     
     # TODO: Different init?
@@ -412,9 +449,23 @@ class MuZero():
     p1_transformation_optimizer = optax_optimizer(p1_transformation_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_transformation_optimizer = optax_optimizer(p2_transformation_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     
+    self.expected_network = ExpectedNetwork(self.config.rnad_hidden_size)
+    
+    expected_params = self.expected_network.init(temp_keys[10], self.example_timestep.obs, self.example_timestep.obs)
+    expected_params_target = self.expected_network.init(temp_keys[10], self.example_timestep.obs, self.example_timestep.obs)
+    
+    expected_optimizer = optax_optimizer(expected_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    expected_optimizer_target = optax_optimizer(expected_params_target, optax.sgd(self.config.target_network_update))
+    
+    self._expected_loss = jax.value_and_grad(self.expected_loss, has_aux=False)
+    
+    self._rnad_with_expected_loss = jax.value_and_grad(self.rnad_with_expected_loss, has_aux=False)
+    
     self.optimizers = Optimizers(
       rnad_optimizer = optimizer,
       rnad_optimizer_target = optimizer_target,
+      expected_optimizer = expected_optimizer,
+      expected_optimizer_target = expected_optimizer_target,
       mvs_optimizer = mvs_optimizer,
       mvs_optimizer_target = mvs_optimizer_target,
       transformation_opitimizer = (p1_transformation_optimizer, p2_transformation_optimizer),
@@ -429,6 +480,8 @@ class MuZero():
       rnad_params_target = params_target,
       rnad_params_prev = params_prev,
       rnad_params_prev_ = params_prev_,
+      expected_params = expected_params,
+      expected_params_target = expected_params_target,
       mvs_params = mvs_params,
       mvs_params_target = mvs_params_target, 
       transformation_params = (p1_transformation_params, p2_transformation_params), 
@@ -439,8 +492,18 @@ class MuZero():
     )
     
     self.learner_steps = 0
-   
-  
+
+  def similarity_output_size(self):
+    if self.config.similarity_metric == SimilarityMetric.POLICY:
+      return self.actions
+    elif self.config.similarity_metric == SimilarityMetric.VALUE:
+      return 1
+    elif self.config.similarity_metric == SimilarityMetric.POLICY_VALUE:
+      return self.actions + 1
+    elif self.config.similarity_metric == SimilarityMetric.LEGAL_ACTIONS:
+      return self.actions
+    assert False, "Unknown similarity metric"   
+
   def default_timestep(self):
     obs = np.zeros(self.game.information_state_tensor_shape(), dtype=np.float32)
     public_state = np.zeros(self.game.public_state_tensor_shape(), dtype=np.float32)
@@ -465,12 +528,12 @@ class MuZero():
     
 
   @functools.partial(jax.jit, static_argnums=(0,))
-  def _jit_get_network(self, params, obs, legal) -> chex.Array:
+  def _jit_get_rnad_network(self, params, obs, legal) -> chex.Array:
     return self.rnad_network.apply(params, obs, legal)
   
   @functools.partial(jax.jit, static_argnums=(0,))
   def _jit_get_policy(self, params, obs, legal) -> chex.Array:
-    return self._jit_get_network(params, obs, legal)[0]
+    return self._jit_get_rnad_network(params, obs, legal)[0]
   
   # TODO: Be careful, this sometimes produces an action that is illegal
   @functools.partial(jax.jit, static_argnums=(0, ))
@@ -508,6 +571,18 @@ class MuZero():
     return self.dynamics_network.apply(params, p1_iset, p2_iset, p1_action, p2_action)
   
   @functools.partial(jax.jit, static_argnums=(0,))
+  def _jit_get_all_abstractions(self, abstraction_params, public_state):
+    return self.abstraction_network.apply(abstraction_params, public_state)
+    
+  @functools.partial(jax.jit, static_argnums=(0,))
+  def _jit_get_iset_probabilities(self, iset_encoder_params, obs):
+    return self.iset_encoder.apply(iset_encoder_params, obs)
+
+  @functools.partial(jax.jit, static_argnums=(0,))
+  def _jit_get_similarity(self, similarity_params, obs):
+    return self.similarity_network.apply(similarity_params, obs)
+  
+  @functools.partial(jax.jit, static_argnums=(0,))
   def _jit_get_abstraction(self,abstraction_params,  iset_params, public_state, obs):
     abstraction = self.abstraction_network.apply(abstraction_params, public_state)
     iset = self.iset_encoder.apply(iset_params, obs)
@@ -528,29 +603,19 @@ class MuZero():
   
   # Expects isets in the original game definition and action as a index of the action
   def get_next_state(self, public_state, p1_iset, p2_iset, p1_action, p2_action):
-    p1_abstraction_iset, p2_abstraction_iset = self.get_both_abstraction(public_state, p1_iset, p2_iset)
-    return self._jit_get_next_state(self.network_parameters.dynamics_params, p1_abstraction_iset, p2_abstraction_iset, p1_action, p2_action) 
+    if self.config.use_abstraction:
+      p1_iset, p2_iset = self.get_both_abstraction(public_state, p1_iset, p2_iset)
+    return self._jit_get_next_state(self.network_parameters.dynamics_params, p1_iset, p2_iset, p1_action, p2_action) 
     
   def get_legal_actions(self, public_state, obs, pl): 
     assert False, "Do not call this method, it is here only because of the older PoC version."
     return self._jit_get_legal_actions(self.network_parameters.abstraction_params[pl], self.network_parameters.iset_encoder_params[pl], self.network_parameters.legal_params[pl], public_state, obs)
   
-  def get_mvs(self, p1_iset, p2_iset):
+  def get_mvs(self, public_state, p1_iset, p2_iset):
+    if self.config.use_abstraction:
+      p1_iset, p2_iset = self.get_both_abstraction(public_state, p1_iset, p2_iset)
     return self.mvs_network.apply(self.network_parameters.mvs_params_target, p1_iset, p2_iset)
-  
-  # Expects obs and legal to be in shape [Batch, Player, ...]
-  def batch_policy_and_action(self, obs, legal):
-    
-    keys = self.get_next_rng_keys_dimensional(obs.shape[:2])
-    keys = np.array(keys)
-    pi, action, action_oh = self._jit_get_batch_policy(self.network_parameters.rnad_params, keys, obs, legal)
-    # pi, action, action_oh = self._jit_get_policy_and_action(self.params, keys, obs, legal)
-    pi = np.array(pi, dtype=np.float64)
-    pi = pi / np.sum(pi, axis=-1, keepdims=True) # TODO: Remove this
-    action = np.array(action, dtype=np.int32)
-    action_oh = np.array(action_oh, dtype=np.float64)
-    return pi, action, action_oh
-    
+ 
   def get_policy(self, state: pyspiel.State, player: int):
     obs = state.information_state_tensor(player) 
     legal = state.legal_actions_mask(player)
@@ -566,7 +631,51 @@ class MuZero():
     pi = np.array(pi, dtype=np.float64)
     return pi[0], pi[1]
   
+  def get_policy_and_value(self, state: pyspiel.State, player: int):
+    obs = state.information_state_tensor(player) 
+    legal = state.legal_actions_mask(player)
+    pi, v, _, _ = self._jit_get_rnad_network(self.network_parameters.rnad_params, obs, legal)
+    return np.array(pi, dtype=np.float64), np.array(v, dtype=np.float64)
+  
+  def get_policy_and_value_both(self, obs, legal):
+    pi, v, _, _ = self._jit_get_rnad_network(self.network_parameters.rnad_params, obs, legal)
+    return pi[0], pi[1], v[0], v[1]
+  
+  def get_policy_and_value_from_state_both(self, state: pyspiel.State):
+    obs = [state.information_state_tensor(pl) for pl in range(2)] 
+    legal = [state.legal_actions_mask(pl) for pl in range(2)]
+    obs = np.array(obs, dtype=np.float32)
+    legal = np.array(legal, dtype=np.int8)
+    pi, v, _, _ = self._jit_get_rnad_network(self.network_parameters.rnad_params, obs, legal)
+    pi = np.array(pi, dtype=np.float64)
+    v = np.array(v, dtype=np.float64)
+    return pi[0], pi[1], v[0], v[1]
+  
+  def get_both_similarities_and_probs(self, public_state: chex.Array, p1_iset: chex.Array, p2_iset:  chex.Array):
+    p1_abstractions = self._jit_get_all_abstractions(self.network_parameters.abstraction_params[0], public_state)
+    p2_abstractions = self._jit_get_all_abstractions(self.network_parameters.abstraction_params[1], public_state)
+    p1_probs = self._jit_get_iset_probabilities(self.network_parameters.iset_encoder_params[0], p1_iset)
+    p2_probs = self._jit_get_iset_probabilities(self.network_parameters.iset_encoder_params[1], p2_iset)
+    p1_similarities = self._jit_get_similarity(self.network_parameters.similarity_params[0], p1_abstractions)
+    p2_similarities = self._jit_get_similarity(self.network_parameters.similarity_params[1], p2_abstractions)
+    return p1_abstractions, p2_abstractions, p1_probs, p2_probs, p1_similarities, p2_similarities
+    
+    
+  
   # TODO: Improve this
+  # Expects obs and legal to be in shape [Batch, Player, ...]
+  def batch_policy_and_action(self, obs, legal):
+    
+    keys = self.get_next_rng_keys_dimensional(obs.shape[:2])
+    keys = np.array(keys)
+    pi, action, action_oh = self._jit_get_batch_policy(self.network_parameters.rnad_params, keys, obs, legal)
+    # pi, action, action_oh = self._jit_get_policy_and_action(self.params, keys, obs, legal)
+    pi = np.array(pi, dtype=np.float64)
+    pi = pi / np.sum(pi, axis=-1, keepdims=True) # TODO: Remove this
+    action = np.array(action, dtype=np.int32)
+    action_oh = np.array(action_oh, dtype=np.float64)
+    return pi, action, action_oh
+    
   def _batch_states_as_timestep(self, states: Sequence[pyspiel.State]) -> TimeStep:
     reward = []
     p1_obs = []
@@ -735,6 +844,8 @@ class MuZero():
     gamma: float = 1.0 # Discount factor
   ):
     importance_sampling = _policy_ratio(network_policy, sampling_policy, action_oh, valid)
+    
+    # The reason we use this is to ensure this is weighted by the amount of the times we sample it
     inverted_sampling = _policy_ratio(jnp.ones_like(sampling_policy), sampling_policy, action_oh, valid)
     
     regularization_entropy = eta * jnp.sum(network_policy * regularization_term, axis=-1)
@@ -775,7 +886,13 @@ class MuZero():
       
       # TODO: Shall we use opponent entropy reg term or entropy of played action?
       
-      q_value = v + weighted_regularization_term  + action_oh * inverted_sampling  *(q_reward + gamma * importance_sampling * (carry.next_value + carry.delta_v) - v )
+      # We use importance sampling of the opponent.
+      opponent_sampling = jnp.flip(importance_sampling, -2)
+      
+      q_value = v + weighted_regularization_term  + action_oh * opponent_sampling * inverted_sampling  * (q_reward + gamma * (carry.next_value + carry.delta_v) - v )
+      
+      
+      # q_value = weighted_regularization_term + action_oh * opponent_sampling * inverted_sampling * (q_reward + gamma * (carry.next_value + carry.delta_v))
       
       next_carry = VTraceCarry(
         next_value=v,
@@ -831,12 +948,32 @@ class MuZero():
     normalization = jnp.sum(timestep.valid) * 2 
     v_loss = jnp.sum((expanded_valid * (v - lax.stop_gradient(v_train_target)) ** 2)) / (normalization + (normalization == 0))
     
-    importance_sampling = jnp.where(timestep.legal, pi / timestep.policy, 0)
+    # Each Q is multiplied by product of importance_sampling of opponent and inverted sampling policy by the acting player.
+    # This computes counterfactual reach probabilities
+    sampling_policy = jnp.sum(timestep.policy * timestep.action, axis=-1, keepdims=True)
+    network_policy = jnp.sum(pi * timestep.action, axis=-1, keepdims=True)
+    
+    
+    # We do not take into account the player reaches, since infoset is always reached with the same prob
+    sampling_policy = jnp.prod(sampling_policy, axis=-2, keepdims=True) 
+    
+    # # TODO: what about invalid turns?
+    importance_sampling = network_policy / sampling_policy
+    
+    importance_sampling = jnp.concatenate((jnp.ones((1, *importance_sampling.shape[1:])), importance_sampling[:-1]), axis=0)
+    importance_sampling = jnp.cumprod(importance_sampling, axis=0)
+    importance_sampling = jnp.flip(importance_sampling, axis=-2)
+    
     
     loss_neurd = neurd_loss(logit, pi, q_value, timestep.legal, importance_sampling)
     
     neurd_loss_value = -jnp.sum(loss_neurd * expanded_valid) / (normalization + (normalization == 0))
     return v_loss + neurd_loss_value
+   
+    
+    
+    
+    
    
   def non_abstracted_transformation_loss(self, 
                                          transformation_params: Params,
@@ -1016,8 +1153,9 @@ class MuZero():
     mvs_train_target = self.state_v_trace(mvs_target, pi, policy_transformations, timestep.action, timestep.valid, timestep.reward, c=self.config.c_state_vtrace, rho=self.config.rho_state_vtrace)
     
     # mask = timestep.valid[..., jnp.newaxis, jnp.newaxis]
+
     loss_v = timestep.valid[..., jnp.newaxis, jnp.newaxis] * (mvs - lax.stop_gradient(mvs_train_target)) ** 2
-    normalization = jnp.sum(timestep.valid) * self.config.transformations 
+    normalization = jnp.sum(timestep.valid) * ((self.config.transformations + 1)  ** 2)
     loss_v = jnp.sum(loss_v) / (normalization + (normalization == 0))
     
     
@@ -1044,7 +1182,7 @@ class MuZero():
     # This computed the kmeans loss and the iset loss. TODO: Add the weighted term to the pi/v distance
     
     
-    return _compute_soft_kmeans_loss_with_single(similarity_target, jnp.concatenate(similarity, -1), iset_probs) 
+    return _compute_soft_kmeans_loss_with_single(similarity_target, similarity, iset_probs) 
     
   # The abstraction and iset params are just for consistency
   def non_abstracted_dynamics_loss(self, 
@@ -1138,6 +1276,8 @@ class MuZero():
     similarity: chex.Array, # Expects to have 2nd to last dimension for playe
     timestep: TimeStep,
   ):
+    if not self.config.train_abstraction:
+      return abstraction_params, iset_encoder_params, similarity_params, optimizers
     abs_grad = []
     for pl in range(2):
       abstraction_loss, abstraction_grad = self._abstraction_loss(
@@ -1171,6 +1311,8 @@ class MuZero():
     timestep: TimeStep,
     
   ):
+    if not self.config.train_mvs:
+      return mvs_params, mvs_params_target, transformation_params, optimizers
     transform_grad = []
     for pl in range(2): 
       transformation_loss, transformation_grad = self._transformation_loss(
@@ -1212,11 +1354,15 @@ class MuZero():
     optimizers: Optimizers,
     timestep: TimeStep
   ):
+    if not self.config.train_dynamics:
+      return dynamics_params, optimizers
+    
     dynamics_loss, dynamics_grad = self._dynamics_loss(dynamics_params, abstraction_params, iset_encoder_params, timestep)
     
     dynamics_params = optimizers.dynamics_optimizer(dynamics_params, dynamics_grad)
     
     return dynamics_params, optimizers
+  
   
   @functools.partial(jax.jit, static_argnums=(0,))
   def update_parameters(
@@ -1227,31 +1373,69 @@ class MuZero():
     alpha: float,
     update_net: bool, 
   ):
+    
+    expected_params, expected_params_target, optimizers = self.update_expected(
+      network_parameters.expected_params,
+      network_parameters.expected_params_target,
+      network_parameters.rnad_params,
+      network_parameters.rnad_params_prev,
+      network_parameters.rnad_params_prev_,
+      optimizers,
+      timestep,
+      alpha
+    )
+    
+      
+    
     vectorized_net_apply = jax.vmap(jax.vmap(self.rnad_network.apply, in_axes=(None, 0, 0), out_axes=0), in_axes=(None, -2, -2), out_axes=-2)
     
     pi_before_train, _, _, _ = vectorized_net_apply(network_parameters.rnad_params, timestep.obs, timestep.legal) 
     
-    rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers = self.update_rnad(
-      network_parameters.rnad_params, 
+    
+    rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers = self.update_rnad_with_expected(
+      network_parameters.rnad_params,
       network_parameters.rnad_params_target,
       network_parameters.rnad_params_prev,
       network_parameters.rnad_params_prev_,
+      expected_params,
+      expected_params_target,
       optimizers,
       timestep,
       alpha,
       update_net
     )
+    # rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers = self.update_rnad(
+    #   network_parameters.rnad_params, 
+    #   network_parameters.rnad_params_target,
+    #   network_parameters.rnad_params_prev,
+    #   network_parameters.rnad_params_prev_,
+    #   optimizers,
+    #   timestep,
+    #   alpha,
+    #   update_net
+    # )
+     
     
-    # v will not be used in future! Here it contains the regularized value functio
+    # v will not be used in future! Here it contains the regularized value function
     pi, v, _, _ = vectorized_net_apply(rnad_params, timestep.obs, timestep.legal)
-    pi_v = jnp.concatenate((pi, v), axis=-1)
+    if self.config.similarity_metric == SimilarityMetric.POLICY_VALUE:
+      similarity = jnp.concatenate(((pi * 2) - 1, v), axis=-1)
+      # similarity = jnp.concatenate((pi, v), axis=-1)
+    elif self.config.similarity_metric == SimilarityMetric.POLICY:
+      similarity = (pi * 2) - 1
+    elif self.config.similarity_metric == SimilarityMetric.VALUE:
+      similarity = v
+    elif self.config.similarity_metric == SimilarityMetric.LEGAL_ACTIONS:
+      similarity = (timestep.legal * 2) - 1 # to be in range [-1, 1]
+      
+    
     
     abstraction_params, iset_encoder_params, similarity_params, optimizers = self.update_abstraction(
       network_parameters.abstraction_params,
       network_parameters.iset_encoder_params,
       network_parameters.similarity_params,
       optimizers,
-      pi_v,
+      similarity,
       timestep
     )
     
@@ -1281,6 +1465,8 @@ class MuZero():
       rnad_params_target=rnad_params_target,
       rnad_params_prev=rnad_params_prev,
       rnad_params_prev_=rnad_params_prev_,
+      expected_params = expected_params,
+      expected_params_target = expected_params_target,
       mvs_params=mvs_params,
       mvs_params_target=mvs_params_target,
       transformation_params=transformation_params,
@@ -1319,7 +1505,44 @@ class MuZero():
     
     
     return self.update_parameters(network_parameters, optimizers, lax.stop_gradient(trajectory), alpha, update_net)
+  
+  
+  @functools.partial(jax.jit, static_argnums=(0,))
+  def update_goofspiel_parameters_no_rnad(
+    self,
+    network_parameters: NetworkParameters,
+    optimizers: Optimizers,
+    key: chex.Array,
+    alpha,
+    update_net, 
+  ):
+    timestep = self.sample_goofspiel_trajectories(network_parameters.rnad_params, key)
      
+    
+    dynamics_params, optimizers = self.update_dynamics(
+      network_parameters.dynamics_params,
+      network_parameters.abstraction_params,
+      network_parameters.iset_encoder_params,
+      optimizers,
+      timestep)
+    
+    
+    return NetworkParameters(
+      # rnad_params=rnad_params,
+      # rnad_params_target=rnad_params_target,
+      # rnad_params_prev=rnad_params_prev,
+      # rnad_params_prev_=rnad_params_prev_,
+      # # expected_params = expected_params,
+      # # expected_params_target = expected_params_target,
+      # mvs_params=mvs_params,
+      # mvs_params_target=mvs_params_target,
+      # transformation_params=transformation_params,
+      # abstraction_params=abstraction_params,
+      # iset_encoder_params=iset_encoder_params,
+      # similarity_params=similarity_params,
+      dynamics_params=dynamics_params
+      ), optimizers
+   
   def goofspiel_step(self):
     key = self.get_next_rng_key()
     alpha, update_regularization = self._entropy_schedule(self.learner_steps)
@@ -1333,11 +1556,282 @@ class MuZero():
     
     self.learner_steps +=1
     
+    
   def multiple_goofspiel_steps(self, iter: int):
     for _ in range(iter):
-      self.goofspiel_step()
+      self.goofspiel_step() 
       
+  def multiple_goofspiel_steps2(self, iter: int):
+    for _ in range(iter):
+      key = self.get_next_rng_key()
+      alpha, update_regularization = self._entropy_schedule(self.learner_steps)
+      
+      self.network_parameters, self.optimizers = self.update_goofspiel_parameters_no_rnad(
+        self.network_parameters,
+        self.optimizers,
+        key, 
+        alpha, 
+        update_regularization)
+      
+      self.learner_steps +=1
+      
+      
+  def update_rnad_with_expected(
+    self,
+    rnad_params: Params,
+    rnad_params_target: Params,
+    rnad_params_prev: Params,
+    rnad_params_prev_: Params,
+    expected_params: Params,
+    expected_params_target: Params,
+    optimizers: Optimizers,
+    timestep: TimeStep,
+    alpha: float,
+    update_net: bool
+  ):
+    if not self.config.train_rnad:
+      return rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers  
+    rnad_loss, rnad_grad = self._rnad_with_expected_loss(rnad_params, rnad_params_prev, rnad_params_prev_,  expected_params_target, timestep, alpha)
     
+    rnad_params = optimizers.rnad_optimizer(rnad_params, rnad_grad)
+    
+    rnad_params_target = optimizers.rnad_optimizer_target(
+        rnad_params_target, jax.tree.map(lambda a, b: a - b, rnad_params_target, rnad_params))
+    
+    rnad_params_prev, rnad_params_prev_ = jax.lax.cond(
+        update_net,
+        lambda: (rnad_params_target, rnad_params_prev),
+        lambda: (rnad_params_prev, rnad_params_prev_))
+    return rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers  
+    
+  def v_trace_with_expected(
+    self,
+    state_v: chex.Array,
+    valid: chex.Array,
+    sampling_policy: chex.Array,
+    network_policy: chex.Array,
+    regularization_term: chex.Array,
+    action_oh: chex.Array,  
+    reward: chex.Array,
+    lambda_: float = 1.0,
+    c: float = 1.0,
+    rho: float = 1.0,
+    eta: float = 0.2,
+    gamma: float = 1.0
+  ):
+    # The reason we use this is to ensure this is weighted by the amount of the times we sample it
+    importance_sampling = _policy_ratio(network_policy, sampling_policy, action_oh, valid)
+    inverted_sampling = _policy_ratio(jnp.ones_like(sampling_policy), sampling_policy, action_oh, valid)
+    
+    # inverted_sampling = jnp.prod(inverted_sampling, axis=-2, keepdims=True)
+    
+    opponent_is = jnp.flip(importance_sampling, axis=-2)
+    
+    weighted_regularization_term = -eta * regularization_term 
+    regularization_entropy = eta * jnp.sum(network_policy * regularization_term, axis=-1)
+    
+    both_player_entropy = regularization_entropy[..., 1] - regularization_entropy[..., 0]
+    
+    both_player_entropy = jnp.stack((both_player_entropy, -both_player_entropy), axis=-1)
+    
+    # Should we use this or the usual reward o.O
+    # opponent_regularized_reward = jnp.stack((reward, -reward), axis = -1) - jnp.flip(jnp.sum(action_oh * weighted_regularization_term, -1), -1) #-  jnp.flip(regularization_entropy, axis=-1) 
+    
+    opponent_regularized_reward = jnp.stack((reward, -reward), axis = -1) + jnp.flip(regularization_entropy, axis=-1)
+    
+    sampling_probability = jnp.sum(sampling_policy * action_oh, axis=-1, keepdims=True)
+    sampling_probability = jnp.prod(sampling_probability, axis=-2, keepdims=True)
+    
+    network_reach_probability = jnp.sum(network_policy * action_oh, axis=-1, keepdims=True)
+    counterfactual_reach = jnp.flip(network_reach_probability, -2)
+
+    is_counterfactual_reach = counterfactual_reach / sampling_probability
+    
+    is_counterfactual_reach = jnp.concatenate((jnp.ones((1, *is_counterfactual_reach.shape[1:])), is_counterfactual_reach[:-1]), axis=0)
+    is_counterfactual_reach = jnp.cumprod(is_counterfactual_reach, axis=0)
+     
+    state_v = jnp.stack((state_v, -state_v), axis=-2)
+    
+    counterfactual_value = state_v * is_counterfactual_reach
+    
+    next_state_v = jnp.concatenate((state_v[1:], jnp.zeros((1, *state_v.shape[1:]))), axis=0)
+    
+    # Is this necessary?
+    state_v_without_entropy = state_v - jnp.expand_dims(regularization_entropy[..., (1, 0)], -1)
+    
+    q_value = state_v_without_entropy + weighted_regularization_term + action_oh * opponent_is * inverted_sampling * (opponent_regularized_reward[..., jnp.newaxis] + gamma * next_state_v - state_v_without_entropy)
+    
+    q_counterfactual_value = q_value * is_counterfactual_reach
+    return counterfactual_value, q_counterfactual_value
+    
+    
+  def rnad_with_expected_loss(
+    self,
+    rnad_params: Params,
+    # rnad_params_target: Params,
+    rnad_params_prev: Params,
+    rnad_params_prev_: Params,
+    # expected_params: Params,
+    expected_params: Params,
+    timestep: TimeStep,
+    alpha: float
+  ):
+    vectorized_net_apply = jax.vmap(jax.vmap(self.rnad_network.apply, in_axes=(None, 0, 0), out_axes=0), in_axes=(None, -2, -2), out_axes=-2)
+    vectorized_expected_apply = jax.vmap(self.expected_network.apply, in_axes=(None, 0, 0), out_axes=0)
+    
+    pi, v, log_pi,  logit = vectorized_net_apply(rnad_params, timestep.obs, timestep.legal)
+    _, _, log_pi_prev, _ = vectorized_net_apply(rnad_params_prev, timestep.obs, timestep.legal)
+    _, _, log_pi_prev_, _ = vectorized_net_apply(rnad_params_prev_, timestep.obs, timestep.legal)
+    
+    
+    state_v = vectorized_expected_apply(expected_params, timestep.obs[..., 0, :], timestep.obs[..., 1, :]) 
+  
+    expanded_valid = jnp.expand_dims(timestep.valid, (-2, -1))
+    regularized_term = log_pi - (alpha * log_pi_prev + (1 - alpha) * log_pi_prev_)
+    
+    v_train_target, q_value = self.v_trace_with_expected(
+      state_v, 
+      expanded_valid, 
+      timestep.policy, 
+      pi, 
+      regularized_term, 
+      timestep.action, 
+      timestep.reward, 
+      c=self.config.c_iset_vtrace, 
+      rho=self.config.rho_iset_vtrace, 
+      eta=self.config.eta_regularization
+    )
+     
+    v_loss = 0.0
+    # We multiply by 2, since each player acts
+    normalization = jnp.sum(timestep.valid) * 2 
+    # v_loss = jnp.sum((expanded_valid * (v - lax.stop_gradient(v_train_target)) ** 2)) / (normalization + (normalization == 0))
+     
+    importance_sampling = jnp.ones_like(q_value)
+    
+    loss_neurd = neurd_loss(logit, pi, q_value, timestep.legal, importance_sampling)
+    
+    neurd_loss_value = -jnp.sum(loss_neurd * expanded_valid) / (normalization + (normalization == 0))
+    return v_loss + neurd_loss_value
+    
+    
+  def update_expected(
+    self,
+    expected_params: Params,
+    expected_params_target: Params,
+    rnad_params: Params,
+    rnad_params_prev: Params,
+    rnad_params_prev_: Params,
+    optimizers: Optimizers,
+    timestep: TimeStep,
+    alpha: float
+  ):
+    if not self.config.train_rnad:
+      return expected_params, expected_params_target, optimizers
+    expected_loss, expected_grad = self._expected_loss(expected_params, expected_params_target, rnad_params, rnad_params_prev, rnad_params_prev_, timestep, alpha)
+    
+    expected_params = optimizers.expected_optimizer(expected_params, expected_grad)
+    
+    expected_params_target = optimizers.expected_optimizer_target(
+        expected_params_target, jax.tree.map(lambda a, b: a - b, expected_params_target, expected_params))
+    
+    return expected_params, expected_params_target, optimizers
+    
+  def expected_v_trace(self,
+                       v: chex.Array,
+                       valid: chex.Array,
+                       sampling_policy: chex.Array,
+                       network_policy: chex.Array,
+                       regularization_term: chex.Array,
+                       action_oh: chex.Array,
+                       reward: chex.Array,
+                       lambda_: float = 1.0,
+                       c: float = 1.0,
+                       rho: float = 1.0,
+                       eta: float = 0.2,
+                       gamma: float = 1.0
+                       ):
+    importance_sampling = _policy_ratio(network_policy, sampling_policy, action_oh, valid[..., jnp.newaxis])
+    regularization_entropy = eta * jnp.sum(network_policy * regularization_term, axis=-1)
+    
+    both_player_entrpy = regularization_entropy[..., 1] - regularization_entropy[..., 0]
+    
+    entropy_reward = jnp.expand_dims(reward + both_player_entrpy, -1)
+    
+    @chex.dataclass(frozen=True)
+    class ExpectedVTraceCarry:
+      next_value: chex.Array
+      delta_v: chex.Array
+    
+    init_carry = ExpectedVTraceCarry(
+      next_value=jnp.zeros_like(v[-1]),
+      delta_v=jnp.zeros_like(v[-1])
+    )
+    
+    def _expected_v_trace(carry: ExpectedVTraceCarry, x) -> tuple[ExpectedVTraceCarry, Any]:
+      (importance_sampling, v, reward, valid) = x
+      
+      rho_ = jnp.prod(jnp.minimum(rho, importance_sampling), -2)
+      c_ = jnp.prod(jnp.minimum(c, importance_sampling), -2)
+      
+      delta_v = rho_ * (reward + gamma * carry.next_value - v)
+      carry_delta_v = delta_v + lambda_ * c_ * gamma * carry.delta_v
+      
+      v_target = v + carry_delta_v
+      
+      reset_carry = init_carry
+      next_carry = ExpectedVTraceCarry(
+        next_value=v,
+        delta_v=carry_delta_v
+      )
+      return tree_where(valid, (next_carry, v_target), (reset_carry, jnp.zeros_like(v_target)))
+    
+    _, v_target = lax.scan(
+      f=_expected_v_trace,
+      init=init_carry,
+      xs=(importance_sampling, v, entropy_reward, valid),
+      reverse=True
+    )
+    return v_target 
+    
+    
+  def expected_loss(self,
+                    expected_params: Params,
+                    expected_params_target: Params,
+                    rnad_params: Params,
+                    rnad_params_prev: Params,
+                    rnad_params_prev_: Params,
+                    timestep: TimeStep,
+                    alpha: float):
+    vectorized_net_apply = jax.vmap(jax.vmap(self.rnad_network.apply, in_axes=(None, 0, 0), out_axes=0), in_axes=(None, -2, -2), out_axes=-2)
+    vectorized_expected_apply = jax.vmap(self.expected_network.apply, in_axes=(None, 0, 0), out_axes=0)
+    
+    pi, _, log_pi, _= vectorized_net_apply(rnad_params, timestep.obs, timestep.legal)
+    
+    _, _, log_pi_prev, _ = vectorized_net_apply(rnad_params_prev, timestep.obs, timestep.legal)
+    _, _, log_pi_prev_, _ = vectorized_net_apply(rnad_params_prev_, timestep.obs, timestep.legal)
+    
+    
+    v = vectorized_expected_apply(expected_params, timestep.obs[..., 0, :], timestep.obs[..., 1, :])
+    v_target = vectorized_expected_apply(expected_params_target, timestep.obs[..., 0, :], timestep.obs[..., 1, :])
+    
+    expanded_valid = jnp.expand_dims(timestep.valid, (-1,))
+    regularized_term = log_pi - (alpha * log_pi_prev + (1 - alpha) * log_pi_prev_)
+    
+    v_train_target = self.expected_v_trace(
+      v_target, 
+      expanded_valid,
+      timestep.policy,
+      pi,
+      regularized_term,
+      timestep.action,
+      timestep.reward,
+    )
+    
+    loss_v = expanded_valid * (v - lax.stop_gradient(v_train_target)) ** 2
+    normalization = jnp.sum(timestep.valid)
+    loss_v = jnp.sum(loss_v) / (normalization + (normalization == 0))
+    return loss_v
     
   # Extract policy only in small games!
   def extract_full_policy(self):
@@ -1561,38 +2055,38 @@ def main():
   # game = orig_game 
   mu = True
   if mu == True:
-    muzero = MuZero(game, MuZeroConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=True, sampling_epsilon=0.0))
+    muzero = MuZero(game, MuZeroConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,)))
     # muzero.rng_key = jax.random.PRNGKey(42)
   else:
     params = [(n, p) for n, p in params.items()]
     muzero = RNaDSolver(RNaDConfig(game_name="goofspiel", game_params=params, trajectory_max=cards-1, batch_size=32))
   
   
-  profiler = Profiler()
-  profiler.start()
-  # with chex.fake_jit():
-  for _ in range(3000):
-    muzero.goofspiel_step()
+  # profiler = Profiler()
+  # profiler.start()
+  with chex.fake_jit():
+    for _ in range(60000):
+      muzero.goofspiel_step()
      
   # goofspiel_compare_learned_trees(muzero, game, orig_game)
   # print("Ee")
   # compare_legals(muzero, game)
-  profiler.stop()
-  print(profiler.output_text(color=True, unicode=True))
+  # profiler.stop()
+  # print(profiler.output_text(color=True, unicode=True))
   
   # policy = muzero.extract_full_policy()
      
-  # policy = muzero.extract_goofspiel_policy(orig_game)
+  policy = muzero.extract_goofspiel_policy(orig_game)
   
-  # # print(policy.action_probabilities(state, 0))
-  # # print(policy.action_probabilities(state, 1))
-  # # print(state.information_state_tensor(0))
-  # # print(state.information_state_tensor(1))
-  # # # print(exploitability(game, policy))
-  # br1 = BestResponsePolicy(orig_game, 0, policy)
-  # br2 = BestResponsePolicy(orig_game, 1, policy)
-  # print(br1.value(orig_game.new_initial_state()))
-  # print(br2.value(orig_game.new_initial_state()))
+  # print(policy.action_probabilities(state, 0))
+  # print(policy.action_probabilities(state, 1))
+  # print(state.information_state_tensor(0))
+  # print(state.information_state_tensor(1))
+  # # print(exploitability(game, policy))
+  br1 = BestResponsePolicy(orig_game, 0, policy)
+  br2 = BestResponsePolicy(orig_game, 1, policy)
+  print(br1.value(orig_game.new_initial_state()))
+  print(br2.value(orig_game.new_initial_state()))
   
   # traj = muzero.sample_trajectories()
   # print(traj.action.shape)
