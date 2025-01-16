@@ -1238,13 +1238,13 @@ class MuZero():
     dynamics_loss = jnp.sum(dynamics_loss ** 2) / (dynamics_normalization + (dynamics_normalization == 0))
     
     reward_loss = ((lax.stop_gradient(reward) - next_reward) ** 2) * valid[..., None]
-    reward_loss =  10 * jnp.sum(reward_loss) / (normalization + (normalization == 0))
+    reward_loss =  jnp.sum(reward_loss) / (normalization + (normalization == 0))
     
     terminal_loss = optax.sigmoid_binary_cross_entropy(jnp.squeeze(is_terminal),  lax.stop_gradient(1 - non_terminal)) * valid
     terminal_loss = jnp.sum(terminal_loss) / (normalization + (normalization == 0))
     
     # return reward_loss + terminal_loss
-    return dynamics_loss + reward_loss + terminal_loss
+    return dynamics_loss + 7 * reward_loss + 7 * terminal_loss
       
       
   def update_rnad(
