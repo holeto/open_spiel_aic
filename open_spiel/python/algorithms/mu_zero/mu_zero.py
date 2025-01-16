@@ -52,6 +52,7 @@ class Optimizers:
   mvs_optimizer_target: Optimizer = ()
   transformation_opitimizer: Sequence[Optimizer] = () 
   abstraction_optimizer: Sequence[Optimizer]  = ()
+  ps_decoder_optimizer: Sequence[Optimizer] = ()
   iset_encoder_optimizer: Sequence[Optimizer]  = ()
   similarity_optimizer: Sequence[Optimizer]  = ()
   dynamics_optimizer: Optimizer = ()
@@ -68,6 +69,7 @@ class NetworkParameters:
   mvs_params_target: Params = ()
   transformation_params: Sequence[Params] = () 
   abstraction_params: Sequence[Params] = ()
+  ps_decoder_params: Sequence[Params] = ()
   iset_encoder_params: Sequence[Params] = ()
   similarity_params: Sequence[Params] = ()
   dynamics_params: Params = ()
@@ -137,6 +139,18 @@ class PublicStateEncoder(nn.Module):
     ps = jnp.squeeze(ps.reshape((-1, self.isets, self.iset_size)))
     return ps
 
+class PublicStateDecoder(nn.Module):
+  hidden_size: int
+  public_state_size: int
+  
+  @nn.compact
+  def __call__(self, x: chex.Array) -> chex.Array:
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    ps = nn.Dense(self.public_state_size)(x)
+    return ps
 
 class LegalActionsNetwork(nn.Module):
   hidden_size: int
@@ -220,7 +234,7 @@ class SimilarityMetric(str, Enum):
   LEGAL_ACTIONS = "legal_actions"
  
 @chex.dataclass(frozen=True)
-class MuZeroConfig: 
+class MuZeroTrainConfig: 
   
   batch_size: int = 32
   
@@ -238,10 +252,13 @@ class MuZeroConfig:
   abstraction_size: int = 32
   similarity_metric: SimilarityMetric = SimilarityMetric.POLICY_VALUE
   
-  ps_hidden_size: int = 128
+  ps_encoder_hidden_size: int = 128
+  ps_decoder_hidden_size: int = 64
   iset_hidden_size: int = 64
   dynamics_hidden_size: int = 64
-  legal_actions_hidden_size: int = 64
+  similarity_hidden_size: int = 64
+  mvs_hidden_size: int = 64
+  transformation_hidden_size: int = 128
   rnad_hidden_size: int = 256
   
   transformations: int = 10
@@ -343,8 +360,8 @@ def _compute_soft_kmeans_loss_with_single(real, pred, probs):
   return cluster_loss + jnp.mean(prob_loss)
 
 # This contains RNaD implementation. Note that this implementation is specific for two-player zero-sum games. Unlike the open_spiel RNaD that can be used to general-sum multiplayer games.
-class MuZero():
-  def __init__(self, game, config) -> None:
+class MuZeroTrain():
+  def __init__(self, game, config: MuZeroTrainConfig) -> None:
     assert config.matrix_valued_states, "Multi-valued states are not implemented."
     self.config = config
     self.game = game
@@ -374,19 +391,24 @@ class MuZero():
         sizes=self.config.entropy_schedule_size,
         repeats=self.config.entropy_schedule_repeats)
     
+    self.expected_network = ExpectedNetwork(self.config.rnad_hidden_size)
     self.rnad_network = RNaDNework(self.config.rnad_hidden_size, self.actions)
-    self.abstraction_network = PublicStateEncoder(self.config.ps_hidden_size, self.config.abstraction_size, self.config.abstraction_amount)
+    self.abstraction_network = PublicStateEncoder(self.config.ps_encoder_hidden_size, self.config.abstraction_size, self.config.abstraction_amount)
+    self.ps_decoder = PublicStateDecoder(self.config.ps_decoder_hidden_size, self.game.public_state_tensor_shape())
     self.iset_encoder = InfosetEncoder(self.config.iset_hidden_size, self.config.abstraction_amount)
-    self.similarity_network = SimilarityNetwork(self.config.iset_hidden_size, self.similarity_output_size())
+    self.similarity_network = SimilarityNetwork(self.config.similarity_hidden_size, self.similarity_output_size())
     # self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.example_timestep.obs.shape[-1])
     self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.obs)
     
-    self.transformation_network = TransformationNetwork(self.config.dynamics_hidden_size, self.config.transformations, self.actions)
-    self.mvs_network = MAVSNetwork(self.config.dynamics_hidden_size, self.config.transformations + 1)
+    self.transformation_network = TransformationNetwork(self.config.transformation_hidden_size, self.config.transformations, self.actions)
+    self.mvs_network = MAVSNetwork(self.config.mvs_hidden_size, self.config.transformations + 1)
     
     
-    self._rnad_loss = jax.value_and_grad(self.rnad_loss, has_aux=False)
-    self._abstraction_loss = jax.value_and_grad(self.abstraction_loss, argnums=[0,1,2], has_aux=False)
+    self._rnad_loss = jax.value_and_grad(self.rnad_loss, has_aux=False) # Deprecate this?
+    self._abstraction_loss = jax.value_and_grad(self.abstraction_loss, argnums=[0,1,2,3], has_aux=False)
+    self._expected_loss = jax.value_and_grad(self.expected_loss, has_aux=False)
+    self._rnad_with_expected_loss = jax.value_and_grad(self.rnad_with_expected_loss, has_aux=False)
+    
     if self.config.use_abstraction:
       self._dynamics_loss = jax.value_and_grad(self.abstracted_dynamics_loss, has_aux=False)
       self._transformation_loss = jax.value_and_grad(self.abstracted_transformation_loss, has_aux=False)
@@ -410,7 +432,8 @@ class MuZero():
     optimizer = optax_optimizer(params, optax.chain(optax.adam(self.config.learning_rate, b1=0.0), optax.clip(100)))
     optimizer_target = optax_optimizer(params_target, optax.sgd(self.config.target_network_update))
     
-    temp_keys = self.get_next_rng_keys(11)
+    temp_keys = self.get_next_rng_keys(13)
+    
     
     
     # TODO: Different init?
@@ -420,24 +443,34 @@ class MuZero():
     p1_iset_encoder_params = self.iset_encoder.init(temp_keys[2], self.example_timestep.obs)
     p2_iset_encoder_params = self.iset_encoder.init(temp_keys[3], self.example_timestep.obs)
     
+    p1_ps_decoder_params = self.ps_decoder.init(temp_keys[4], np.ones((1, self.config.abstraction_size)))
+    p2_ps_decoder_params = self.ps_decoder.init(temp_keys[5], np.ones((1, self.config.abstraction_size)))
+    
     # Similarity always uses abstraction
-    p1_similarity_params = self.similarity_network.init(temp_keys[4], np.ones((1, self.config.abstraction_size)))
-    p2_similarity_params = self.similarity_network.init(temp_keys[5], np.ones((1, self.config.abstraction_size)))
+    p1_similarity_params = self.similarity_network.init(temp_keys[6], np.ones((1, self.config.abstraction_size)))
+    p2_similarity_params = self.similarity_network.init(temp_keys[7], np.ones((1, self.config.abstraction_size)))
     
     # self.dynamics_params = self.dynamics_network.init(temp_keys[6], self.example_timestep.obs, self.example_timestep.obs, self.example_timestep.action, self.example_timestep.action)
-    dynamics_params = self.dynamics_network.init(temp_keys[6], self.example_obs, self.example_obs, self.example_timestep.action, self.example_timestep.action)
+    dynamics_params = self.dynamics_network.init(temp_keys[8], self.example_obs, self.example_obs, self.example_timestep.action, self.example_timestep.action)
     
-    mvs_params = self.mvs_network.init(temp_keys[7], self.example_obs, self.example_obs)
-    mvs_params_target = self.mvs_network.init(temp_keys[7], self.example_obs, self.example_obs)
+    mvs_params = self.mvs_network.init(temp_keys[9], self.example_obs, self.example_obs)
+    mvs_params_target = self.mvs_network.init(temp_keys[9], self.example_obs, self.example_obs)
     
-    p1_transformation_params = self.transformation_network.init(temp_keys[8], self.example_obs)
-    p2_transformation_params = self.transformation_network.init(temp_keys[9], self.example_obs)
+    p1_transformation_params = self.transformation_network.init(temp_keys[10], self.example_obs)
+    p2_transformation_params = self.transformation_network.init(temp_keys[11], self.example_obs)
+    
+    expected_params = self.expected_network.init(temp_keys[12], self.example_timestep.obs, self.example_timestep.obs)
+    expected_params_target = self.expected_network.init(temp_keys[12], self.example_timestep.obs, self.example_timestep.obs)
     
     
     p1_abstraction_optimizer = optax_optimizer(p1_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_abstraction_optimizer = optax_optimizer(p2_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p1_iset_encoder_optimizer = optax_optimizer(p1_iset_encoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_iset_encoder_optimizer = optax_optimizer(p2_iset_encoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    
+    p1_ps_decoder_optimizer = optax_optimizer(p1_ps_decoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    p2_ps_decoder_optimizer = optax_optimizer(p2_ps_decoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    
     p1_similarity_optimizer = optax_optimizer(p1_similarity_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_similarity_optimizer = optax_optimizer(p2_similarity_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     
@@ -449,17 +482,11 @@ class MuZero():
     p1_transformation_optimizer = optax_optimizer(p1_transformation_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_transformation_optimizer = optax_optimizer(p2_transformation_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     
-    self.expected_network = ExpectedNetwork(self.config.rnad_hidden_size)
-    
-    expected_params = self.expected_network.init(temp_keys[10], self.example_timestep.obs, self.example_timestep.obs)
-    expected_params_target = self.expected_network.init(temp_keys[10], self.example_timestep.obs, self.example_timestep.obs)
     
     expected_optimizer = optax_optimizer(expected_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     expected_optimizer_target = optax_optimizer(expected_params_target, optax.sgd(self.config.target_network_update))
     
-    self._expected_loss = jax.value_and_grad(self.expected_loss, has_aux=False)
     
-    self._rnad_with_expected_loss = jax.value_and_grad(self.rnad_with_expected_loss, has_aux=False)
     
     self.optimizers = Optimizers(
       rnad_optimizer = optimizer,
@@ -470,6 +497,7 @@ class MuZero():
       mvs_optimizer_target = mvs_optimizer_target,
       transformation_opitimizer = (p1_transformation_optimizer, p2_transformation_optimizer),
       abstraction_optimizer = (p1_abstraction_optimizer, p2_abstraction_optimizer),
+      ps_decoder_optimizer= (p1_ps_decoder_optimizer, p2_ps_decoder_optimizer),
       iset_encoder_optimizer = (p1_iset_encoder_optimizer, p2_iset_encoder_optimizer),
       similarity_optimizer = (p1_similarity_optimizer, p2_similarity_optimizer),
       dynamics_optimizer = dynamics_optimizer
@@ -486,6 +514,7 @@ class MuZero():
       mvs_params_target = mvs_params_target, 
       transformation_params = (p1_transformation_params, p2_transformation_params), 
       abstraction_params = (p1_abstraction_params, p2_abstraction_params),
+      ps_decoder_params= (p1_ps_decoder_params, p2_ps_decoder_params),
       iset_encoder_params = (p1_iset_encoder_params, p2_iset_encoder_params),
       similarity_params = (p1_similarity_params, p1_similarity_params),
       dynamics_params = dynamics_params
@@ -593,6 +622,10 @@ class MuZero():
   def _jit_get_mvs(self, mvs_params, p1_iset, p2_iset):
     return self.mvs_network.apply(mvs_params, p1_iset, p2_iset)
   
+  @functools.partial(jax.jit, static_argnums=(0, ))
+  def _jit_get_decoded_public_state(self, ps_decoder_params, obs):
+    return self.ps_decoder.apply(ps_decoder_params, obs)
+  
   # The observaiton is already only for a given player pl
   def get_abstraction(self, public_state, obs, pl):
     return self._jit_get_abstraction(self.network_parameters.abstraction_params[pl], self.network_parameters.iset_encoder_params[pl], public_state, obs) 
@@ -601,7 +634,10 @@ class MuZero():
     p1_abstraction_iset = self._jit_get_abstraction(self.network_parameters.abstraction_params[0], self.network_parameters.iset_encoder_params[0], public_state, p1_iset)
     p2_abstraction_iset = self._jit_get_abstraction(self.network_parameters.abstraction_params[1], self.network_parameters.iset_encoder_params[1], public_state, p2_iset)
     return p1_abstraction_iset, p2_abstraction_iset
-  
+
+  def get_decoded_public_state(self, obs, pl):
+    return self._jit_get_decoded_public_state(self.network_parameters.ps_decoder_params[pl], obs)
+
   def get_non_abstracted_next_state(self, public_state, p1_iset, p2_iset, p1_action, p2_action):
     return self._jit_get_next_state(self.network_parameters.dynamics_params, p1_iset, p2_iset, p1_action, p2_action)
   
@@ -1167,6 +1203,7 @@ class MuZero():
   
   def abstraction_loss(self,
                        abstraction_params: Params,
+                       ps_decoder_params: Params,
                        iset_encoder_params: Params, 
                        similarity_params: Params, 
                        similarity_target: chex.Array,
@@ -1174,19 +1211,23 @@ class MuZero():
                        obs: chex.Array): 
     
     vectorized_abstraction = jax.vmap(self.abstraction_network.apply, in_axes=(None, 0), out_axes=0)
+    vectorized_ps_decoder = jax.vmap(jax.vmap(self.ps_decoder.apply, in_axes=(None, 0), out_axes=0), in_axes=(None, -2), out_axes=-2)
     vectorized_iset_encoder = jax.vmap(self.iset_encoder.apply, in_axes=(None, 0), out_axes=0) 
     vectorized_similarity = jax.vmap(jax.vmap(self.similarity_network.apply, in_axes=(None, 0), out_axes=0), in_axes=(None, -2), out_axes=-2)
     
     
     
+    
     abstraction = vectorized_abstraction(abstraction_params, public_state)
+    decoded_ps = vectorized_ps_decoder(ps_decoder_params, abstraction)
     iset_probs = vectorized_iset_encoder(iset_encoder_params, obs)
     similarity = vectorized_similarity(similarity_params, abstraction) 
     
-    # This computed the kmeans loss and the iset loss. TODO: Add the weighted term to the pi/v distance
+    ps_loss = jnp.expand_dims(public_state, -2) - decoded_ps
+    ps_loss = jnp.mean(ps_loss ** 2)
     
-    
-    return _compute_soft_kmeans_loss_with_single(similarity_target, similarity, iset_probs) 
+    # This computes the kmeans loss and the iset loss. TODO: Add the weighted term to the pi/v distance 
+    return _compute_soft_kmeans_loss_with_single(similarity_target, similarity, iset_probs) + ps_loss
     
   # The abstraction and iset params are just for consistency
   def non_abstracted_dynamics_loss(self, 
@@ -1274,6 +1315,7 @@ class MuZero():
   def update_abstraction(
     self,
     abstraction_params: tuple[Params, Params],
+    ps_decoder_params: tuple[Params, Params],
     iset_encoder_params: tuple[Params, Params],
     similarity_params: tuple[Params, Params],
     optimizers: Optimizers,
@@ -1281,11 +1323,12 @@ class MuZero():
     timestep: TimeStep,
   ):
     if not self.config.train_abstraction:
-      return abstraction_params, iset_encoder_params, similarity_params, optimizers
+      return abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers
     abs_grad = []
     for pl in range(2):
       abstraction_loss, abstraction_grad = self._abstraction_loss(
         abstraction_params[pl], 
+        ps_decoder_params[pl],
         iset_encoder_params[pl], 
         similarity_params[pl], 
         jax.lax.stop_gradient(similarity[..., pl, :]), 
@@ -1296,10 +1339,11 @@ class MuZero():
       abs_grad.append(abstraction_grad)
     
     abstraction_params = (*[optimizers.abstraction_optimizer[pl](abstraction_params[pl], abs_grad[pl][0]) for pl in range(2)],)
-    iset_encoder_params = (*[optimizers.iset_encoder_optimizer[pl](iset_encoder_params[pl], abs_grad[pl][1]) for pl in range(2)],)
-    similarity_params = (*[optimizers.similarity_optimizer[pl](similarity_params[pl], abs_grad[pl][2]) for pl in range(2)],)
+    ps_decoder_params = (*[optimizers.ps_decoder_optimizer[pl](ps_decoder_params[pl], abs_grad[pl][1]) for pl in range(2)],)
+    iset_encoder_params = (*[optimizers.iset_encoder_optimizer[pl](iset_encoder_params[pl], abs_grad[pl][2]) for pl in range(2)],)
+    similarity_params = (*[optimizers.similarity_optimizer[pl](similarity_params[pl], abs_grad[pl][3]) for pl in range(2)],)
     
-    return abstraction_params, iset_encoder_params, similarity_params, optimizers
+    return abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers
     
   def update_mvs_with_transformations(
     self,
@@ -1434,8 +1478,9 @@ class MuZero():
       
     
     
-    abstraction_params, iset_encoder_params, similarity_params, optimizers = self.update_abstraction(
+    abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers = self.update_abstraction(
       network_parameters.abstraction_params,
+      network_parameters.ps_decoder_params,
       network_parameters.iset_encoder_params,
       network_parameters.similarity_params,
       optimizers,
@@ -1475,6 +1520,7 @@ class MuZero():
       mvs_params_target=mvs_params_target,
       transformation_params=transformation_params,
       abstraction_params=abstraction_params,
+      ps_decoder_params=ps_decoder_params,
       iset_encoder_params=iset_encoder_params,
       similarity_params=similarity_params,
       dynamics_params=dynamics_params
@@ -1936,11 +1982,14 @@ class MuZero():
     self.optimizers.mvs_optimizer.state = state["optimizers"].mvs_optimizer
     self.optimizers.mvs_optimizer_target.state = state["optimizers"].mvs_optimizer_target
     self.optimizers.dynamics_optimizer.state = state["optimizers"].dynamics_optimizer
+    self.optimizers.expected_optimizer.state = state["optimizers"].expected_optimizer
+    self.optimizers.expected_optimizer_target.state = state["optimizers"].expected_optimizer_target
     for pl in range(2):
       self.optimizers.transformation_opitimizer[pl].state = state["optimizers"].transformation_opitimizer[pl]
       self.optimizers.abstraction_optimizer[pl].state = state["optimizers"].abstraction_optimizer[pl]
       self.optimizers.iset_encoder_optimizer[pl].state = state["optimizers"].iset_encoder_optimizer[pl]
       self.optimizers.similarity_optimizer[pl].state = state["optimizers"].similarity_optimizer[pl]
+      self.optimizers.ps_decoder_optimizer[pl].state = state["optimizers"].ps_decoder_optimizer[pl]
     
      
 
@@ -2059,7 +2108,7 @@ def main():
   # game = orig_game 
   mu = True
   if mu == True:
-    muzero = MuZero(game, MuZeroConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,)))
+    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,)))
     # muzero.rng_key = jax.random.PRNGKey(42)
   else:
     params = [(n, p) for n, p in params.items()]
