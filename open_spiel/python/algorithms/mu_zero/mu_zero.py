@@ -55,6 +55,7 @@ class Optimizers:
   ps_decoder_optimizer: Sequence[Optimizer] = ()
   iset_encoder_optimizer: Sequence[Optimizer]  = ()
   similarity_optimizer: Sequence[Optimizer]  = ()
+  legal_actions_optimizer: Sequence[Optimizer] = ()
   dynamics_optimizer: Optimizer = ()
  
 @chex.dataclass
@@ -72,6 +73,7 @@ class NetworkParameters:
   ps_decoder_params: Sequence[Params] = ()
   iset_encoder_params: Sequence[Params] = ()
   similarity_params: Sequence[Params] = ()
+  legal_actions_params: Sequence[Params] = ()
   dynamics_params: Params = ()
   
   
@@ -245,6 +247,7 @@ class MuZeroTrainConfig:
   train_mvs: bool = True
   train_abstraction: bool = True
   train_dynamics: bool = True
+  train_legal_actions: bool = True
   
   
   use_abstraction: bool = False
@@ -258,6 +261,7 @@ class MuZeroTrainConfig:
   dynamics_hidden_size: int = 64
   similarity_hidden_size: int = 64
   mvs_hidden_size: int = 64
+  legal_actions_hidden_size: int = 64
   transformation_hidden_size: int = 128
   rnad_hidden_size: int = 256
   
@@ -397,7 +401,7 @@ class MuZeroTrain():
     self.ps_decoder = PublicStateDecoder(self.config.ps_decoder_hidden_size, self.game.public_state_tensor_shape())
     self.iset_encoder = InfosetEncoder(self.config.iset_hidden_size, self.config.abstraction_amount)
     self.similarity_network = SimilarityNetwork(self.config.similarity_hidden_size, self.similarity_output_size())
-    # self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.example_timestep.obs.shape[-1])
+    self.legal_actions_network = LegalActionsNetwork(self.config.legal_actions_hidden_size, self.actions)
     self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.obs)
     
     self.transformation_network = TransformationNetwork(self.config.transformation_hidden_size, self.config.transformations, self.actions)
@@ -413,54 +417,56 @@ class MuZeroTrain():
       self._dynamics_loss = jax.value_and_grad(self.abstracted_dynamics_loss, has_aux=False)
       self._transformation_loss = jax.value_and_grad(self.abstracted_transformation_loss, has_aux=False)
       self._mvs_loss = jax.value_and_grad(self.abstracted_mvs_loss, has_aux=False)
+      self._legal_actions_loss = jax.value_and_grad(self.abstracted_legal_actions_loss, has_aux=False)
     else: 
       self._dynamics_loss = jax.value_and_grad(self.non_abstracted_dynamics_loss, has_aux=False)
       self._transformation_loss = jax.value_and_grad(self.non_abstracted_transformation_loss, has_aux=False)
       self._mvs_loss = jax.value_and_grad(self.non_abstracted_mvs_loss, has_aux=False)
+      self._legal_actions_loss = jax.value_and_grad(self.non_abstracted_legal_actions_loss, has_aux=False)
+     
     
-    # self._mvs_loss = 
-    
-    # self._dynamics_loss = jax.value_and_grad(self.non_abstracted_dynamics_loss, has_aux=False)
-    # self._non_abstracted_dynamics_loss = jax.value_and_grad(self.non_abstracted_dynamics_loss, has_aux=False)
-    
-    temp_key = self.get_next_rng_key()
-    params = self.rnad_network.init(temp_key, self.example_timestep.obs, self.example_timestep.legal)
-    params_target = self.rnad_network.init(temp_key, self.example_timestep.obs, self.example_timestep.legal)
-    params_prev = self.rnad_network.init(temp_key, self.example_timestep.obs, self.example_timestep.legal)
-    params_prev_ = self.rnad_network.init(temp_key, self.example_timestep.obs, self.example_timestep.legal)
+    # temp_key = self.get_next_rng_key()
+    temp_keys = self.get_next_rng_keys(16)
+    params = self.rnad_network.init(temp_keys[0], self.example_timestep.obs, self.example_timestep.legal)
+    params_target = self.rnad_network.init(temp_keys[0], self.example_timestep.obs, self.example_timestep.legal)
+    params_prev = self.rnad_network.init(temp_keys[0], self.example_timestep.obs, self.example_timestep.legal)
+    params_prev_ = self.rnad_network.init(temp_keys[0], self.example_timestep.obs, self.example_timestep.legal)
     
     optimizer = optax_optimizer(params, optax.chain(optax.adam(self.config.learning_rate, b1=0.0), optax.clip(100)))
     optimizer_target = optax_optimizer(params_target, optax.sgd(self.config.target_network_update))
     
-    temp_keys = self.get_next_rng_keys(13)
     
     
     
     # TODO: Different init?
-    p1_abstraction_params = self.abstraction_network.init(temp_keys[0], self.example_timestep.public_state)
-    p2_abstraction_params = self.abstraction_network.init(temp_keys[1], self.example_timestep.public_state)
-    # TODO: Do we want 2 different networks for iset encoder and legal action?
-    p1_iset_encoder_params = self.iset_encoder.init(temp_keys[2], self.example_timestep.obs)
-    p2_iset_encoder_params = self.iset_encoder.init(temp_keys[3], self.example_timestep.obs)
+    p1_abstraction_params = self.abstraction_network.init(temp_keys[1], self.example_timestep.public_state)
+    p2_abstraction_params = self.abstraction_network.init(temp_keys[2], self.example_timestep.public_state)
     
-    p1_ps_decoder_params = self.ps_decoder.init(temp_keys[4], np.ones((1, self.config.abstraction_size)))
-    p2_ps_decoder_params = self.ps_decoder.init(temp_keys[5], np.ones((1, self.config.abstraction_size)))
+    # TODO: Do we want 2 different networks for iset encoder and similarity?
+    p1_iset_encoder_params = self.iset_encoder.init(temp_keys[3], self.example_timestep.obs)
+    p2_iset_encoder_params = self.iset_encoder.init(temp_keys[4], self.example_timestep.obs)
+    
+    p1_ps_decoder_params = self.ps_decoder.init(temp_keys[5], np.ones((1, self.config.abstraction_size)))
+    p2_ps_decoder_params = self.ps_decoder.init(temp_keys[6], np.ones((1, self.config.abstraction_size)))
     
     # Similarity always uses abstraction
-    p1_similarity_params = self.similarity_network.init(temp_keys[6], np.ones((1, self.config.abstraction_size)))
-    p2_similarity_params = self.similarity_network.init(temp_keys[7], np.ones((1, self.config.abstraction_size)))
+    p1_similarity_params = self.similarity_network.init(temp_keys[7], np.ones((1, self.config.abstraction_size)))
+    p2_similarity_params = self.similarity_network.init(temp_keys[8], np.ones((1, self.config.abstraction_size)))
+    
+    p1_legal_actions_params = self.legal_actions_network.init(temp_keys[9], self.example_obs)
+    p2_legal_actions_params = self.legal_actions_network.init(temp_keys[10], self.example_obs)
     
     # self.dynamics_params = self.dynamics_network.init(temp_keys[6], self.example_timestep.obs, self.example_timestep.obs, self.example_timestep.action, self.example_timestep.action)
-    dynamics_params = self.dynamics_network.init(temp_keys[8], self.example_obs, self.example_obs, self.example_timestep.action, self.example_timestep.action)
+    dynamics_params = self.dynamics_network.init(temp_keys[11], self.example_obs, self.example_obs, self.example_timestep.action, self.example_timestep.action)
     
-    mvs_params = self.mvs_network.init(temp_keys[9], self.example_obs, self.example_obs)
-    mvs_params_target = self.mvs_network.init(temp_keys[9], self.example_obs, self.example_obs)
+    mvs_params = self.mvs_network.init(temp_keys[12], self.example_obs, self.example_obs)
+    mvs_params_target = self.mvs_network.init(temp_keys[12], self.example_obs, self.example_obs)
     
-    p1_transformation_params = self.transformation_network.init(temp_keys[10], self.example_obs)
-    p2_transformation_params = self.transformation_network.init(temp_keys[11], self.example_obs)
+    p1_transformation_params = self.transformation_network.init(temp_keys[13], self.example_obs)
+    p2_transformation_params = self.transformation_network.init(temp_keys[14], self.example_obs)
     
-    expected_params = self.expected_network.init(temp_keys[12], self.example_timestep.obs, self.example_timestep.obs)
-    expected_params_target = self.expected_network.init(temp_keys[12], self.example_timestep.obs, self.example_timestep.obs)
+    expected_params = self.expected_network.init(temp_keys[15], self.example_timestep.obs, self.example_timestep.obs)
+    expected_params_target = self.expected_network.init(temp_keys[15], self.example_timestep.obs, self.example_timestep.obs)
     
     
     p1_abstraction_optimizer = optax_optimizer(p1_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
@@ -473,6 +479,9 @@ class MuZeroTrain():
     
     p1_similarity_optimizer = optax_optimizer(p1_similarity_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_similarity_optimizer = optax_optimizer(p2_similarity_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    
+    p1_legal_actions_optimizer = optax_optimizer(p1_legal_actions_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    p2_legal_actions_optimizer = optax_optimizer(p2_legal_actions_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     
     dynamics_optimizer = optax_optimizer(dynamics_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     
@@ -500,6 +509,7 @@ class MuZeroTrain():
       ps_decoder_optimizer= (p1_ps_decoder_optimizer, p2_ps_decoder_optimizer),
       iset_encoder_optimizer = (p1_iset_encoder_optimizer, p2_iset_encoder_optimizer),
       similarity_optimizer = (p1_similarity_optimizer, p2_similarity_optimizer),
+      legal_actions_optimizer= (p1_legal_actions_optimizer, p2_legal_actions_optimizer),
       dynamics_optimizer = dynamics_optimizer
     )
     
@@ -517,6 +527,7 @@ class MuZeroTrain():
       ps_decoder_params= (p1_ps_decoder_params, p2_ps_decoder_params),
       iset_encoder_params = (p1_iset_encoder_params, p2_iset_encoder_params),
       similarity_params = (p1_similarity_params, p1_similarity_params),
+      legal_actions_params= (p1_legal_actions_params, p2_legal_actions_params),
       dynamics_params = dynamics_params
     )
     
@@ -1229,12 +1240,55 @@ class MuZeroTrain():
     # This computes the kmeans loss and the iset loss. TODO: Add the weighted term to the pi/v distance 
     return _compute_soft_kmeans_loss_with_single(similarity_target, similarity, iset_probs) + ps_loss
     
+  def non_abstracted_legal_actions_loss(self,
+                                        legal_actions_params: Params,
+                                        abstraction_params: Params,
+                                        iset_encoder_params: Params,
+                                        public_state: chex.Array,
+                                        obs: chex.Array,
+                                        legal: chex.Array,
+                                        valid: chex.Array
+                                        ):
+    return self.legal_actions_loss(legal_actions_params, obs, legal, valid)
+    pass
+
+  def abstracted_legal_actions_loss(self,
+                                    legal_actions_params: Params,
+                                    abstraction_params: Params,
+                                    iset_encoder_params: Params,
+                                    public_state: chex.Array,
+                                    obs: chex.Array,
+                                    legal: chex.Array,
+                                    valid: chex.Array
+                                    ):
+    
+    vectorized_abstraction = jax.vmap(self._jit_get_abstraction, in_axes=(None, None, 0, 0), out_axes=0)
+    abstracted_obs = vectorized_abstraction(abstraction_params, iset_encoder_params, public_state, obs) 
+    return self.legal_actions_loss(legal_actions_params, abstracted_obs, legal, valid)
+  
+  def legal_actions_loss(
+    self,
+    legal_actions_params: Params, 
+    obs: chex.Array,
+    legal: chex.Array,
+    valid: chex.Array
+  ):
+    vectorized_legal_actions = jax.vmap(self.legal_actions_network.apply, in_axes=(None, 0), out_axes=0)
+    legal_actions = vectorized_legal_actions(legal_actions_params, obs)
+    
+    loss = optax.losses.sigmoid_focal_loss(legal_actions, legal)
+    loss = jnp.sum(loss) / jnp.sum(valid)
+    # loss = jnp.sum((legal - legal_actions) ** 2) / jnp.sum(valid)
+    return loss
+    
   # The abstraction and iset params are just for consistency
   def non_abstracted_dynamics_loss(self, 
                                    dynamics_params: Params,
                                    abstraction_params: tuple[Params, Params],
                                    iset_encoder_params: tuple[Params, Params],
                                    timestep: TimeStep):
+    
+    
     
     return self.dynamics_loss(dynamics_params, timestep.obs, timestep.action, timestep.valid, timestep.reward)
 
@@ -1394,6 +1448,34 @@ class MuZeroTrain():
     
     return mvs_params, mvs_params_target, transformation_params, optimizers
   
+  def update_legal_actions(
+    self,
+    legal_actions_params: tuple[Params, Params],
+    abstraction_params: tuple[Params, Params],
+    iset_encoder_params: tuple[Params, Params],
+    optimizers: Optimizers,
+    timestep: TimeStep
+  ):
+    if not self.config.train_legal_actions:
+      return legal_actions_params, optimizers
+    legal_actions_grads = []
+    for pl in range(2):
+      legal_actions_loss, legal_actions_grad = self._legal_actions_loss(
+        legal_actions_params[pl],
+        abstraction_params[pl],
+        iset_encoder_params[pl],
+        timestep.public_state,
+        timestep.obs[..., pl, :],
+        timestep.legal[..., pl, :],
+        timestep.valid
+      )
+      legal_actions_grads.append(legal_actions_grad)
+      
+    legal_actions_params = (*[optimizers.legal_actions_optimizer[pl](legal_actions_params[pl], legal_actions_grads[pl]) for pl in range(2)],)
+    return legal_actions_params, optimizers
+      
+    
+  
   def update_dynamics(
     self,
     dynamics_params: Params,
@@ -1501,6 +1583,14 @@ class MuZeroTrain():
       timestep
     )
     
+    legal_actions_params, optimizers = self.update_legal_actions(
+      network_parameters.legal_actions_params,
+      abstraction_params,
+      iset_encoder_params,
+      optimizers,
+      timestep
+    )
+    
     dynamics_params, optimizers = self.update_dynamics(
       network_parameters.dynamics_params,
       abstraction_params,
@@ -1523,6 +1613,7 @@ class MuZeroTrain():
       ps_decoder_params=ps_decoder_params,
       iset_encoder_params=iset_encoder_params,
       similarity_params=similarity_params,
+      legal_actions_params = legal_actions_params,
       dynamics_params=dynamics_params
       ), optimizers
   
@@ -2108,7 +2199,7 @@ def main():
   # game = orig_game 
   mu = True
   if mu == True:
-    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,)))
+    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=False, sampling_epsilon=0.0, entropy_schedule_size=(3000,)))
     # muzero.rng_key = jax.random.PRNGKey(42)
   else:
     params = [(n, p) for n, p in params.items()]
