@@ -589,6 +589,10 @@ class MuZero():
     picked_iset = jnp.argmax(iset, axis=-1, keepdims=True)
     return jnp.squeeze(jnp.take_along_axis(abstraction, picked_iset[..., jnp.newaxis], axis=-2))
   
+  @functools.partial(jax.jit, static_argnums=(0, ))
+  def _jit_get_mvs(self, mvs_params, p1_iset, p2_iset):
+    return self.mvs_network.apply(mvs_params, p1_iset, p2_iset)
+  
   # The observaiton is already only for a given player pl
   def get_abstraction(self, public_state, obs, pl):
     return self._jit_get_abstraction(self.network_parameters.abstraction_params[pl], self.network_parameters.iset_encoder_params[pl], public_state, obs) 
@@ -614,7 +618,7 @@ class MuZero():
   def get_mvs(self, public_state, p1_iset, p2_iset):
     if self.config.use_abstraction:
       p1_iset, p2_iset = self.get_both_abstraction(public_state, p1_iset, p2_iset)
-    return self.mvs_network.apply(self.network_parameters.mvs_params_target, p1_iset, p2_iset)
+    return self._jit_get_mvs(self.network_parameters.mvs_params_target, p1_iset, p2_iset) 
  
   def get_policy(self, state: pyspiel.State, player: int):
     obs = state.information_state_tensor(player) 
@@ -1142,7 +1146,7 @@ class MuZero():
     
     transformation_direction = normalize_direction_with_mask(transformation_direction, jnp.expand_dims(timestep.legal * timestep.valid[..., jnp.newaxis, jnp.newaxis], -3))
     
-    transformation_direction = jnp.concatenate((transformation_direction, jnp.expand_dims(jnp.zeros_like(pi), -3)), -3)
+    transformation_direction = jnp.concatenate((jnp.expand_dims(jnp.zeros_like(pi), -3), transformation_direction), -3)
     
     policy_transformations = jnp.expand_dims(pi, -3) + transformation_direction    
     policy_transformations = jnp.maximum(policy_transformations, 1e-12) # To invalidate negative actions and zeros.
@@ -1150,7 +1154,7 @@ class MuZero():
     # Invalid actions ?
     policy_transformations = policy_transformations / jnp.sum(policy_transformations, axis=-1, keepdims=True)
      
-    mvs_train_target = self.state_v_trace(mvs_target, pi, policy_transformations, timestep.action, timestep.valid, timestep.reward, c=self.config.c_state_vtrace, rho=self.config.rho_state_vtrace)
+    mvs_train_target = self.state_v_trace(mvs_target, timestep.policy, policy_transformations, timestep.action, timestep.valid, timestep.reward, c=self.config.c_state_vtrace, rho=self.config.rho_state_vtrace)
     
     # mask = timestep.valid[..., jnp.newaxis, jnp.newaxis]
 
