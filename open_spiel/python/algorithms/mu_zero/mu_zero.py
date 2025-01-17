@@ -597,12 +597,8 @@ class MuZeroTrain():
     return jax.vmap(self._jit_get_policy_and_action, in_axes=(None, 1, 1, 1), out_axes=1)(params, keys, obs, legal)
   
   @functools.partial(jax.jit, static_argnums=(0,))
-  def _jit_get_legal_actions(self, abstract_params, iset_encoder_params, legal_params, public_state, obs) -> chex.Array:
-    isets = self.abstraction_network.apply(abstract_params, public_state)
-    iset_probs = self.iset_encoder.apply(iset_encoder_params, obs)
-    iset_choice = jnp.argmax(iset_probs, axis=-1)
-    legal = self.legal_actions_network.apply(legal_params, isets[jnp.arange(public_state.shape[0]), iset_choice])
-    return legal
+  def _jit_get_legal_actions(self, legal_actions_params, obs) -> chex.Array:
+    return self.legal_actions_network.apply(legal_actions_params, obs)
     
   @functools.partial(jax.jit, static_argnums=(0,))
   def _jit_get_next_state(self, params, p1_iset, p2_iset, p1_action, p2_action):
@@ -652,15 +648,33 @@ class MuZeroTrain():
   def get_non_abstracted_next_state(self, public_state, p1_iset, p2_iset, p1_action, p2_action):
     return self._jit_get_next_state(self.network_parameters.dynamics_params, p1_iset, p2_iset, p1_action, p2_action)
   
+  def get_next_state_from_abstraction(self, p1_iset, p2_iset, p1_action, p2_action):
+    return self._jit_get_next_state(self.network_parameters.dynamics_params, p1_iset, p2_iset, p1_action, p2_action) 
+    
+  
   # Expects isets in the original game definition and action as a index of the action
   def get_next_state(self, public_state, p1_iset, p2_iset, p1_action, p2_action):
     if self.config.use_abstraction:
       p1_iset, p2_iset = self.get_both_abstraction(public_state, p1_iset, p2_iset)
     return self._jit_get_next_state(self.network_parameters.dynamics_params, p1_iset, p2_iset, p1_action, p2_action) 
     
-  def get_legal_actions(self, public_state, obs, pl): 
-    assert False, "Do not call this method, it is here only because of the older PoC version."
-    return self._jit_get_legal_actions(self.network_parameters.abstraction_params[pl], self.network_parameters.iset_encoder_params[pl], self.network_parameters.legal_params[pl], public_state, obs)
+  def get_legal_actions(self, public_state, obs, pl):
+    if self.config.use_abstraction:
+      obs = self.get_abstraction(public_state, obs, pl)
+    return self._jit_get_legal_actions(self.network_parameters.legal_actions_params[pl], obs)
+  
+  def get_both_legal_actions_from_abstraction(self, p1_iset, p2_iset):
+    p1_legal = self._jit_get_legal_actions(self.network_parameters.legal_actions_params[0], p1_iset)
+    p2_legal = self._jit_get_legal_actions(self.network_parameters.legal_actions_params[1], p2_iset)
+    return p1_legal, p2_legal
+  
+  def get_both_legal_actions(self, public_state, p1_iset, p2_iset):
+    if self.config.use_abstraction:
+      p1_iset, p2_iset = self.get_both_abstraction(public_state, p1_iset, p2_iset)
+    p1_legal = self._jit_get_legal_actions(self.network_parameters.legal_actions_params[0], p1_iset)
+    p2_legal = self._jit_get_legal_actions(self.network_parameters.legal_actions_params[1], p2_iset)
+    return p1_legal, p2_legal
+      
   
   def get_mvs(self, public_state, p1_iset, p2_iset):
     if self.config.use_abstraction:
