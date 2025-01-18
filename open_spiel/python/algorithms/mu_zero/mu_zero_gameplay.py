@@ -97,8 +97,7 @@ class MuZeroGameplay:
    
   def validate_terminal(self, terminal, threshold: float = 0.5):
     return terminal < threshold
-
-    
+  
   # Starts in a single public state and creates a DL-tree.
   # Each layer should be done at once. Any call to NN should be done once!
   def prepare_cfr_structure(self, p1_iset, p2_iset):
@@ -113,22 +112,8 @@ class MuZeroGameplay:
     depth_history_previous_history = []
     depth_history_next_history = []
     
-    def handle_single_layer(curr_iset, prev_iset, prev_action, prev_history):
-      action_utility = []
+    def create_iset_map(curr_iset):
       isets = [[], []]
-      actions = []
-      legal = [] 
-      next_history = []
-      p1_legal, p2_legal = self.muzero.get_both_legal_actions_from_abstraction(curr_iset[0], curr_iset[1])
-      p1_legal, p2_legal = p1_legal > 0, p2_legal > 0
-      legal_stacked = np.stack((p1_legal, p2_legal), 0)
-      # TODO: verify this is correct
-      legal_prod = p1_legal[..., None] * p2_legal[..., None, :]
-      legal = legal_prod
-      # iset = np.stack((p1_iset, p2_iset), 0)
-  
-      # TODO: Do not check the whole map, but only the part of the map in the current depth
-      # So probably initialize the index where to start as len(iset_map[pl]).
       for pl in range(curr_iset.shape[0]):
         first_iset_id = len(iset_map[pl])
         for i in range(curr_iset.shape[1]): 
@@ -141,10 +126,30 @@ class MuZeroGameplay:
             curr_index = len(iset_map[pl])
             iset_map[pl].append(curr_iset[pl, i])  
           isets[pl].append(curr_index)
+      return np.array(isets)
+    
+    def handle_mvs_layer(curr_iset, prev_iset, prev_action, prev_history):
+      isets = create_iset_map(curr_iset)
       
+      
+      
+      pass
+      
+    
+    
+    def handle_single_layer(curr_iset, prev_iset, prev_action, prev_history, depth):
+      
+      
+      isets = create_iset_map(curr_iset)
+      
+      p1_legal, p2_legal = self.muzero.get_both_legal_actions_from_abstraction(curr_iset[0], curr_iset[1])
+      p1_legal, p2_legal = p1_legal > 0, p2_legal > 0
+      
+      # If we ever change to Bool[D, H(D),Pl, A], Instead of [D, H(D),A1, A2]
+      # legal_stacked = np.stack((p1_legal, p2_legal), 0)
+      legal = p1_legal[..., None] * p2_legal[..., None, :]  
       # TODO: Could this be jitted from here onward?
-      # What spedup would that bring? Requires to change some indexing to jnp.where
-      isets = np.array(isets)
+      # What spedup would that bring? Would require to change some indexing to jnp.where 
       actions = isets[..., None] * self.actions + np.arange(self.actions)[None, None, ...] 
       
       # Even with in dimension -1, we want output dimension to be before the last dimension.
@@ -158,11 +163,11 @@ class MuZeroGameplay:
       next_p1_isets, next_p2_isets, next_utilities, next_terminal = vectorized_abstraction(curr_iset[0], curr_iset[1], p1_actions, p2_actions) 
       
       
-      action_utility = next_utilities[..., 0] # We will select only utilities of player 0. We can do some more fancy stuff here, but whatever.
-      # action_utility = (next_utilities[..., 0] - next_utilities[..., 1]) / 2
+      action_utility = legal * next_utilities[..., 0] # We will select only utilities of player 0. We can do some more fancy stuff here, but whatever.
+      # action_utility = legal * (next_utilities[..., 0] - next_utilities[..., 1]) / 2
       
       
-      non_terminal = np.squeeze(self.validate_terminal(next_terminal), -1) * legal_prod
+      non_terminal = np.squeeze(self.validate_terminal(next_terminal), -1) * legal
       # next_flattened_p1_isets = np.choose()
       
       
@@ -197,13 +202,24 @@ class MuZeroGameplay:
       depth_history_previous_history.append(prev_history)
       depth_history_next_history.append(next_history)
       
-      handle_single_layer(next_isets, 
-                          next_prev_isets,
-                          next_prev_actions,
-                          next_prev_history
-                          )
+      if depth + 1 == self.config.depth_limit:
+        handle_mvs_layer(next_isets,
+                         next_prev_isets,
+                         next_prev_actions,
+                         next_prev_history
+                         )
+      else:
+        handle_single_layer(next_isets, 
+                            next_prev_isets,
+                            next_prev_actions,
+                            next_prev_history,
+                            depth+1
+                            )
+       
+        
       
-    handle_single_layer(np.stack((p1_iset, p2_iset), axis=0), np.zeros((1,)),  np.zeros((1,)),  np.zeros((1,)))
+      
+    handle_single_layer(np.stack((p1_iset, p2_iset), axis=0), np.zeros((1,)),  np.zeros((1,)),  np.zeros((1,)), 0)
  
   
   def prepare_cfr_gadget_structure(self, p1_iset, p2_iset, reaches, cf_values):
