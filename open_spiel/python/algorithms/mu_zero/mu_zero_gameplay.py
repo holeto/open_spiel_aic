@@ -113,13 +113,13 @@ class MuZeroGameplay:
     depth_history_previous_history = []
     depth_history_next_history = []
     
-    def handle_single_layer(p1_iset, p2_iset, prev_iset, prev_action, prev_history):
+    def handle_single_layer(curr_iset, prev_iset, prev_action, prev_history):
       action_utility = []
       isets = [[], []]
       actions = []
       legal = [] 
       next_history = []
-      p1_legal, p2_legal = self.muzero.get_both_legal_actions_from_abstraction(p1_iset, p2_iset)
+      p1_legal, p2_legal = self.muzero.get_both_legal_actions_from_abstraction(curr_iset[0], curr_iset[1])
       p1_legal, p2_legal = p1_legal > 0, p2_legal > 0
       legal_stacked = np.stack((p1_legal, p2_legal), 0)
       # TODO: verify this is correct
@@ -129,72 +129,81 @@ class MuZeroGameplay:
   
       # TODO: Do not check the whole map, but only the part of the map in the current depth
       # So probably initialize the index where to start as len(iset_map[pl]).
-      for pl, pl_isets in enumerate([p1_iset, p2_iset]):
-        for i, iset in enumerate(pl_isets):
+      for pl in range(curr_iset.shape[0]):
+        first_iset_id = len(iset_map[pl])
+        for i in range(curr_iset.shape[1]): 
           curr_index = -1
-          for j, im in enumerate(iset_map[pl]):
-            if self.check_iset_similarity(im, iset):
+          for j in range(first_iset_id, len(iset_map[pl])):
+            if self.check_iset_similarity(iset_map[pl][j], curr_iset[pl, i]):
               curr_index = j
               break
           if curr_index < 0:
             curr_index = len(iset_map[pl])
-            iset_map[pl].append(iset)  
+            iset_map[pl].append(curr_iset[pl, i])  
           isets[pl].append(curr_index)
       
+      # TODO: Could this be jitted from here onward?
+      # What spedup would that bring? Requires to change some indexing to jnp.where
       isets = np.array(isets)
-      action = isets[..., None] * self.actions + np.arange(self.actions)[None, None, ...] 
-      vectorized_abstraction = jax.vmap(jax.vmap(self.muzero.get_next_state_from_abstraction, in_axes=(None, None, -1, -1), out_axes=(-1, -1, -1, -1)), in_axes=(None, None, -1, -1), out_axes=(-1, -1, -1, -1))
+      actions = isets[..., None] * self.actions + np.arange(self.actions)[None, None, ...] 
+      
+      # Even with in dimension -1, we want output dimension to be before the last dimension.
+      # Checked that this does what is supposed (which is np.transpose(res, (0, 2, 3, 1)))
+      vectorized_abstraction = jax.vmap(jax.vmap(self.muzero.get_next_state_from_abstraction, in_axes=(None, None, -1, -1), out_axes=(-2, -2, -2, -2)), in_axes=(None, None, -1, -1), out_axes=(-2, -2, -2, -2))
       
       # TODO: Can this be done better so we do not have to copy the actions for each player, but so that we can just use it as it is.
       p1_actions = np.repeat(np.arange(self.actions)[None, ...], self.actions, axis=0)
-      p1_actions = np.repeat(p1_actions[None, ...], len(p1_iset), axis= 0) # Repeats for each history
+      p1_actions = np.repeat(p1_actions[None, ...], curr_iset.shape[1], axis= 0) # Repeats for each history
       p2_actions = np.transpose(p1_actions, (0, 2, 1))
-      next_p1_isets, next_p2_isets, next_utilities, next_terminal = vectorized_abstraction(p1_iset, p2_iset, p1_actions, p2_actions) 
-      action_utility = next_utilities
-      non_terminal = self.validate_terminal(next_terminal) 
+      next_p1_isets, next_p2_isets, next_utilities, next_terminal = vectorized_abstraction(curr_iset[0], curr_iset[1], p1_actions, p2_actions) 
+      
+      
+      action_utility = next_utilities[..., 0] # We will select only utilities of player 0. We can do some more fancy stuff here, but whatever.
+      # action_utility = (next_utilities[..., 0] - next_utilities[..., 1]) / 2
+      
+      
+      non_terminal = np.squeeze(self.validate_terminal(next_terminal), -1) * legal_prod
       # next_flattened_p1_isets = np.choose()
-      # FIXME: This seems bad, but working
+      
+      
       # From [H(D), A1, A2] should select [H(D + 1)] 
       # nonzero() returns indices which are non zero in tuple (4-tuple in this case)
       nonzeros = non_terminal.nonzero()
-      next_flattened_p1_isets = next_p1_isets[nonzeros[0], :, nonzeros[2], nonzeros[3]]
-      next_flattened_p2_isets = next_p2_isets[nonzeros[0], :, nonzeros[2], nonzeros[3]]
+      next_isets = np.stack((next_p1_isets, next_p2_isets), 0)
+      both_actions = np.stack((p1_actions, p2_actions), 0)
+      next_isets = next_isets[:, *nonzeros, :] 
       
-      # TODO: Until here in first iteration it seems to work
       
-      # FIXME: This will not work
-      # For each history from H(D + 1) select previous infoset and action 
-      next_prev_p1_isets = iset[0][non_terminal.nonzero()]
-      next_prev_p2_isets = iset[1][non_terminal.nonzero()]
-      next_prev_actions_p1 = p1_actions[non_terminal.nonzero()]
-      next_prev_actions_p2 = p2_actions[non_terminal.nonzero()]
-      next_prev_actions_p1 = next_prev_p1_isets * self.actions + next_prev_actions_p1
-      next_prev_actions_p2 = next_prev_p2_isets * self.actions + next_prev_actions_p2
+      # For each history from H(D + 1) select previous infoset and action
+      next_prev_isets = isets[:, nonzeros[0]]
+      next_prev_actions = both_actions[:, *nonzeros]
+      next_prev_actions = next_prev_isets * self.actions + next_prev_actions
       
-      # FIXME
+      
+      
       # This should be easy, just for each nonzero terminal create value based on it;s index in first dimension
-      next_prev_history = terminals.nonzero()[0]
+      next_prev_history = nonzeros[0]
     
-      #FIXME
-      # This should be -1 everywhere, except the part where you have net history. Ther eyou go by terminal and just add 1
-      next_history = (np.cumsum(next_terminal).reshape(next_terminal.shape) * next_terminal) - 1
+      
+      # This should be -1 everywhere, except the part where you have next history. Therey ou go by terminal and just add 1
+      next_history = (np.cumsum(non_terminal).reshape(non_terminal.shape) * non_terminal) - 1
       
       depth_history_action_utility.append(action_utility)
       depth_history_iset.append(isets)
       depth_history_actions.append(actions)
-      depth_history_legal.append(legal)
+      depth_history_legal.append(legal) 
       depth_history_previous_iset.append(prev_iset)
       depth_history_previous_action.append(prev_action)
       depth_history_previous_history.append(prev_history)
       depth_history_next_history.append(next_history)
       
-      handle_single_layer(next_flattened_p1_isets, next_flattened_p2_isets, 
-                          (next_prev_p1_isets, next_prev_p2_isets),
-                          (next_prev_actions_p1, next_prev_actions_p2),
+      handle_single_layer(next_isets, 
+                          next_prev_isets,
+                          next_prev_actions,
                           next_prev_history
                           )
       
-    handle_single_layer(p1_iset, p2_iset, np.zeros((1,)),  np.zeros((1,)),  np.zeros((1,)))
+    handle_single_layer(np.stack((p1_iset, p2_iset), axis=0), np.zeros((1,)),  np.zeros((1,)),  np.zeros((1,)))
  
   
   def prepare_cfr_gadget_structure(self, p1_iset, p2_iset, reaches, cf_values):
