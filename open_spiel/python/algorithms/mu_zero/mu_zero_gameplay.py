@@ -66,6 +66,7 @@ class MuZeroGameplay:
 
     #DL Tree
     self.iset_map = [[], []]
+    # TODO: Remove, these will be stored in MuZeroCFRConstants, that will be passed used to run CFR
     self.depth_history_action_utility = []
     self.depth_history_iset = []
     self.depth_history_actions = []
@@ -143,25 +144,29 @@ class MuZeroGameplay:
             curr_index = len(self.iset_map[pl])
             self.iset_map[pl].append(curr_iset[pl, i])  
           isets[pl].append(curr_index)
-      return np.array(isets)
+      actions = isets[..., None] * self.actions + np.arange(self.actions)[None, None, ...] 
+      return np.array(isets), actions
     
     
     def handle_mvs_layer(curr_iset, prev_iset, prev_action, prev_history):
-      isets = create_iset_map(curr_iset)
+      isets, actions = create_iset_map(curr_iset)
       #print(isets.shape)
       mvs_vals = self.muzero.get_mvs_from_abstraction(curr_iset[0], curr_iset[1])
-      #mvs values are from the perspective of player 1
+      #mvs values are from the perspective of player 0
       transformation_utils = np.stack((mvs_vals, -mvs_vals), axis=0)
-      legal = np.tile(np.ones((self.mvs_actions, self.mvs_actions), dtype=bool), (2, 1))
+      legal = np.ones((curr_iset.shape[1], 2, self.mvs_actions, self.mvs_actions), dtype=bool)
+      next_history = np.full((curr_iset.shape[1], self.mvs_actions, self.mvs_actions), -1)
       
       self.depth_history_previous_iset.append(prev_iset)
       self.depth_history_previous_action.append(prev_action)
       self.depth_history_previous_history.append(prev_history)
+      
+      
       self.depth_history_action_utility.append(transformation_utils)
       self.depth_history_iset.append(isets)
-      #TODO: Do we want to append these?
-      self.depth_history_legal.append(legal)
-      #TODO: Do we want to append something for next history?
+      self.depth_history_actions.append(actions) 
+      self.depth_history_legal.append(legal) 
+      self.depth_history_next_history.append(next_history)
       
       
     
@@ -169,17 +174,16 @@ class MuZeroGameplay:
     def handle_single_layer(curr_iset, prev_iset, prev_action, prev_history, depth):
       
       
-      isets = create_iset_map(curr_iset)
+      isets, actions = create_iset_map(curr_iset)
+      # TODO: Could this be jitted from here onward?
+      # What spedup would that bring? Would require to change some indexing to jnp.where 
       
       p1_legal, p2_legal = self.muzero.get_both_legal_actions_from_abstraction(curr_iset[0], curr_iset[1])
       p1_legal, p2_legal = p1_legal > 0, p2_legal > 0
-      
+      legal = p1_legal[..., None] * p2_legal #[..., None, :]
       # If we ever change to Bool[D, H(D),Pl, A], Instead of [D, H(D),A1, A2]
       # legal_stacked = np.stack((p1_legal, p2_legal), 0)
-      legal = p1_legal[..., None] * p2_legal #[..., None, :]
-      # TODO: Could this be jitted from here onward?
-      # What spedup would that bring? Would require to change some indexing to jnp.where 
-      actions = isets[..., None] * self.actions + np.arange(self.actions)[None, None, ...] 
+      
       
       # Even with in dimension -1, we want output dimension to be before the last dimension.
       # Checked that this does what is supposed (which is np.transpose(res, (0, 2, 3, 1)))
@@ -294,6 +298,8 @@ class MuZeroGameplay:
     self.depth_history_next_history.append(next_history)
     self.init_iset_reaches = reaches
     self.prepare_cfr_structure(p1_iset, p2_iset)
+    
+    return MuZeroCFRConstants()
     
   
   def run_cfr(self, cfr):

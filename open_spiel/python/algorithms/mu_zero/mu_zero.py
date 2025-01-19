@@ -675,6 +675,8 @@ class MuZeroTrain():
     p2_legal = self._jit_get_legal_actions(self.network_parameters.legal_actions_params[1], p2_iset)
     return p1_legal, p2_legal
       
+  def get_mvs_from_abstraction(self, p1_iset, p2_iset):
+    return self._jit_get_mvs(self.network_parameters.mvs_params_target, p1_iset, p2_iset) 
   
   def get_mvs(self, public_state, p1_iset, p2_iset):
     if self.config.use_abstraction:
