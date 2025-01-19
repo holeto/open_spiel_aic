@@ -128,6 +128,7 @@ class MuZeroGameplay:
     iset_action_depth = []
     
     # TODO: Split the map to be separate for each depth.
+    # Because of imperfect recall it does not make sense to have all the isets in the same map.
     def create_iset_map(curr_iset, amount_actions):
       isets = [[], []]
       for pl in range(curr_iset.shape[0]):
@@ -272,12 +273,14 @@ class MuZeroGameplay:
       depth_history_previous_history.append(prev_history)
       
       next_prev_iset = isets
-      next_prev_action = np.stack((next_prev_iset, next_prev_iset + 1), 1)
-      handle_single_layer(curr_iset, isets, prev_action, prev_history, 0)   
+      # For resolving player action 0, for other the action 1
+      action_id = np.array([self.config.player, 1 - self.config.player])
+      next_prev_action = isets[..., None] * 2 + action_id[None, None, ...]
+      handle_single_layer(curr_iset, isets, next_prev_action, prev_history, 0)   
        
     prev_iset = np.zeros_like(reaches, dtype=np.int64)
     prev_action = np.zeros_like(reaches, dtype=np.int64)
-    prev_history = np.zeros_like(reaches, dtype=np.int64)
+    prev_history = np.zeros_like(reaches[0], dtype=np.int64)
     
     if construct_gadget:
       handle_gadget_layer(isets, prev_iset, prev_action, prev_history, cf_values)
