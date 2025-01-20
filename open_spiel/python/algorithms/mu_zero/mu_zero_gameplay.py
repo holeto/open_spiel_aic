@@ -116,7 +116,8 @@ class MuZeroGameplay:
       #print(isets.shape)
       mvs_vals = self.muzero.get_mvs_from_abstraction(curr_iset[0], curr_iset[1])
       #mvs values are from the perspective of player 0
-      transformation_utils = np.stack((mvs_vals, -mvs_vals), axis=0)
+      transformation_utils = mvs_vals
+      #transformation_utils = np.stack((mvs_vals, -mvs_vals), axis=0)
       legal = np.ones((curr_iset.shape[1], 2, self.mvs_actions, self.mvs_actions), dtype=bool)
       next_history = np.full((curr_iset.shape[1], self.mvs_actions, self.mvs_actions), -1)
       
@@ -257,9 +258,10 @@ class MuZeroGameplay:
       handle_gadget_layer(isets, prev_iset, prev_action, prev_history, cf_values)
     else:
       handle_single_layer(isets, prev_iset, prev_action, prev_history, 0)
-
     return MuZeroCFRConstants(
       max_depth = len(depth_history_iset),
+      non_gadget_root_depth = int(construct_gadget),
+      resolving_player = self.config.player,
       
       depth_actions = [a.shape[-1] for a in depth_history_actions],
       depth_iset_map = depth_iset_map,
