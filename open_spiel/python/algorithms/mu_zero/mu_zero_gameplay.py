@@ -85,6 +85,7 @@ class MuZeroGameplay:
     # TODO: Do the same thing as with histories? Since we know that each player plays at each turn. 
     iset_previous_action = []
     iset_action_mask = []
+    #This is probably not needed
     iset_action_depth = []
     
     # TODO: Split the map to be separate for each depth.
@@ -142,9 +143,9 @@ class MuZeroGameplay:
       
       p1_legal, p2_legal = self.muzero.get_both_legal_actions_from_abstraction(curr_iset[0], curr_iset[1])
       p1_legal, p2_legal = p1_legal > 0, p2_legal > 0
-      legal = p1_legal[..., None] * p2_legal #[..., None, :]
+      legal = p1_legal[..., None] * p2_legal [..., None, :]
       # If we ever change to Bool[D, H(D),Pl, A], Instead of [D, H(D),A1, A2]
-      # legal_stacked = np.stack((p1_legal, p2_legal), 0)
+      legal_stacked = np.stack((p1_legal, p2_legal), 0)
       
       
       # Even with in dimension -1, we want output dimension to be before the last dimension.
@@ -178,6 +179,8 @@ class MuZeroGameplay:
       next_prev_isets = isets[:, nonzeros[0]]
       next_prev_actions = both_actions[:, *nonzeros]
       next_prev_actions = next_prev_isets * self.actions + next_prev_actions
+      #TODO Maybe this will be too slow and can be done in better way
+      iset_prev_action = np.unique(next_prev_actions)
       
       # This should be easy, just for each nonzero terminal create value based on it's index in first dimension
       next_prev_history = nonzeros[0]
@@ -187,6 +190,8 @@ class MuZeroGameplay:
       next_history = (np.cumsum(non_terminal).reshape(non_terminal.shape) * non_terminal) - 1
       
       depth_iset_map.append(iset_map)
+      iset_action_mask.append(legal_stacked)
+      iset_previous_action.append(iset_prev_action)
       depth_history_action_utility.append(action_utility)
       depth_history_iset.append(isets)
       depth_history_actions.append(actions)
