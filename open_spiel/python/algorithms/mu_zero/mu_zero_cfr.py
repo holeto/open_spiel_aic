@@ -15,7 +15,7 @@ class MuZeroCFRConstants:
 
   max_iset_depth: chex.ArrayTree = ()  # Is just a list of integers
   depth_actions: chex.ArrayTree = ()  # Is just a list of integers
-  depth_iset_map: chex.ArrayTree = () # ID -> Abstract iset for each D
+  depth_iset_map: chex.ArrayTree = () # ID -> Abstract iset for each D [D, Pl, S(D)]
   
   # Symbols: 
   #   D -> Depth
@@ -60,6 +60,8 @@ class MuZeroCFR:
     self.regrets = [[jnp.zeros((self.constants.iset_previous_action[d][pl].shape[0], a)) for pl in range(2)] for d, a in enumerate(constants.depth_actions)]
     #Should be [D, Pl, S(D), A] ?   
     self.averages = [[jnp.zeros((self.constants.iset_previous_action[d][pl].shape[0], a)) for pl in range(2)] for d, a in enumerate(constants.depth_actions)]
+    #TODO: Making assumption that regrets and averages will be converted to a single jnp array instead of lists of jnp arrays
+    #not sure if it is correct.
 
   def propagate_strategy(self, current_strategy):
     #Expecting current strategy to be [D, Pl, S(D), A]
@@ -69,6 +71,20 @@ class MuZeroCFR:
         realization_plans[pl, depth, ...] = realization_plans[pl, depth - 1, ...] * current_strategy[pl, depth - 1, :, self.constants.iset_previous_action]
     return realization_plans
   
+  def average_policy_dict(self, stop_depth = -1):
+    stop = stop_depth if stop_depth > 0 else self.constants.max_depth
+    average_dict = {}
+    for depth in range(self.constants.non_gadget_root_depth, stop):
+      for iset_idx in range(self.averages[depth, self.constants.resolving_player].shape[0]):
+        iset = self.constants.depth_iset_map[depth, self.constants.resolving_player, iset_idx]
+        iset_str = jnp.array_str(iset)
+        if not iset_str in average_dict:
+          average_dict[iset_str] = self.averages[depth, self.constants.resolving_player, iset_idx, :]
+    return average_dict
+  
+  def average_root_policy_dict(self):
+    return self.average_policy_dict(stop_depth=1)
+  
   def step(self, regrets, averages, average_policy_update_coefficient, player):
     #[D, Pl, S(D), A]
     current_strategies = self.regret_matching(self.regrets)
@@ -77,7 +93,7 @@ class MuZeroCFR:
     weighted_strategies[self.constants.non_gadget_root_depth, self.resolving_player, ...] *= self.init_iset_reaches
     #[D, Pl, S(D), A]
     realization_plans = self.propagate_strategy(weighted_strategies)
-    #[D, Pl, S(D), 1]
+    #[D, Pl, S(D)]
     iset_reaches = jnp.sum(realization_plans, axis=-1)
     #propagate from down to top
     #[H(D), A(1 -pl), A(pl)]
@@ -108,8 +124,18 @@ class MuZeroCFR:
         regrets[d][pl] = jnp.where(jnp.logical_or(player == pl, player == JAX_CFR_SIMULTANEOUS_UPDATE), regrets[d][pl] + bin_regret)
     #FIXME: To work like this, regrets and averages  would have to be stored in one jnp array. Do we want that?
     regrets = self.update_regrets(regrets)
-    jnp.where(jnp.logical_or(player == pl, player == JAX_CFR_SIMULTANEOUS_UPDATE), averages + current_strategies  * iset_reaches[..., jnp.newaxis]  * average_policy_update_coefficient, averages)
+    averages = jnp.where(jnp.logical_or(player == pl, player == JAX_CFR_SIMULTANEOUS_UPDATE), averages + current_strategies  * iset_reaches[..., jnp.newaxis]  * average_policy_update_coefficient, averages)
     #TODO: Add counterfactual values
     return regrets, averages
+  
+  def multiple_steps(self, num_steps):
+    for i in range(num_steps):
+      averaging_coefficient = i + 1 if self._linear_averaging else 1
+      if(self._alternating_updates):
+        for pl in range(self.players):
+          self.regrets, self.averages = self.step(self.regrets, self.averages, averaging_coefficient, pl)
+      else:
+          self.regrets, self.averages = self.step(self.regrets, self.averages, averaging_coefficient, JAX_CFR_SIMULTANEOUS_UPDATE)
+
 
     

@@ -5,10 +5,11 @@ import jax.lax as lax
 
 import chex
 import numpy as np
+import queue
 
 from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
 from open_spiel.python.algorithms.mu_zero.mu_zero import MuZeroTrain
-from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFRConstants
+from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFRConstants, MuZeroCFR
 
 @chex.dataclass(frozen=True)
 class MuZeroGameplayConfig:
@@ -31,6 +32,7 @@ class MuZeroGameplay:
     self.new_game = True # flag that specifies whether we are at the beginning of the game or whether we have moved
     
     self.init_isets = self.initialize_isets()
+    self.policy = None
     
   def initialize_isets(self):
     if isinstance(self.muzero.game, JaxOriginalGoofspiel):
@@ -53,14 +55,62 @@ class MuZeroGameplay:
     p1_iset, p2_iset = self.muzero.get_both_abstraction(public_state, *self.init_isets)
     return np.stack((p1_iset[None, ...], p2_iset[None, ...]), 0) # Shape would be [Pl, 1, Iset]
   
-  def find_root_from_previous(self, public_state, iset):
+  def find_root_from_previous(self, cfr : MuZeroCFR, public_state, iset):
   # We are passing public state and infoset separately, but from iset you should be able to get public state ideally.
-    pass
-    #End this method by clearing the previous tree
-    # self.clear_tree()
+    realization_plans = cfr.propagate_strategy(cfr.averages)
+    #[D, Pl, S(D)]
+    reaches = jnp.sum(realization_plans, axis = -1)
+    #interested in the reaches for the resolving player in the last layer
+    #[S(D)]
+    last_layer_reaches = reaches[-1, self.config.player, :]
+    #list [S(D)][S(D)]
+    last_layer_isets = [cfr.constants.depth_iset_map[-1][pl][cfr.constants.depth_history_iset[-1][pl]] for pl in range(2)]
+    pub_state = []
+    #TODO: Naive version
+    visited = []
+    q = queue()
+    def check_visited(new_iset):
+      for iset in visited:
+        if self.check_iset_similarity(iset, new_iset):
+          return True
+      return False
+    def add_by_iset(iset, player):
+      num_isets = last_layer_isets[player].shape[0]
+      for i in range(num_isets):
+        pl_iset = last_layer_isets[player][i]
+        if self.check_iset_similarity(pl_iset, iset):
+          opp_iset = last_layer_isets[1 - player][i]
+          state = []
+          if player == 0:
+            state.append(pl_iset)
+            state.append(opp_iset)
+          else:
+            state.append(opp_iset)
+            state.append(pl_iset)
+          q.enqueue(state)
+      return q
+    q = add_by_iset(iset, self.config.player)
+    visited.append(iset)
+    while not q.empty():
+      p1_iset, p2_iset = q.dequeue()
+      pub_state.append([p1_iset, p2_iset])
+      if not check_visited(p1_iset):
+        add_by_iset(p1_iset, 0)
+        visited.append(iset)
+      elif not check_visited(p2_iset):
+        add_by_iset(p2_iset, 0)
+        visited.append(p2_iset)
+      
+    #TODO: Pick only last layer reaches which are for isets in public state
+    #TODO: Return also CF values from the CFR
+    return pub_state, last_layer_reaches
+
   
   def check_iset_similarity(self, iset1, iset2):
     return False
+  
+  # def check_pub_state_intersection(self, iset, public_state):
+  #   return False
    
   def validate_terminal(self, terminal, threshold: float = 0.5):
     return terminal < threshold
@@ -278,12 +328,17 @@ class MuZeroGameplay:
     )
     
 
-  def run_cfr(self, cfr):
-    pass  
+  def run_cfr(self, cfr: MuZeroCFR):
+    cfr.multiple_steps(self.config.resolve_iterations)
+    self.policy = cfr.average_root_policy_dict()
+    return self.policy
    
   # Returns either policy or None. latter is that the policy is not computed yet.
   def get_policy(self, iset):
-    return None
+    iset_str = jnp.array_str(iset)
+    if self.policy is None or iset_str not in self.policy:
+      return None
+    return self.policy[iset_str]
     
   def get_action(self, public_state, iset):
     optional_policy = self.get_policy(iset)
@@ -299,7 +354,8 @@ class MuZeroGameplay:
     else:
       isets, reaches, cf_values= self.find_root_from_previous(public_state, iset) 
       
-    cfr = self.prepare_cfr_structure(isets, reaches, cf_values, True)
+    cfr_constants = self.prepare_cfr_structure(isets, reaches, cf_values, True)
+    cfr = MuZeroCFR(cfr_constants, reaches)
     
     policy = self.run_cfr(cfr)
     return np.random.choice(self.actions, p=policy)
