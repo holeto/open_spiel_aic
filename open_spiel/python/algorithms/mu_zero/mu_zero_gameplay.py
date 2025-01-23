@@ -8,7 +8,7 @@ import numpy as np
 
 from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
 from open_spiel.python.algorithms.mu_zero.mu_zero import MuZeroTrain
-from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFRConstants
+from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFRConstants, MuZeroCFR
 
 @chex.dataclass(frozen=True)
 class MuZeroGameplayConfig:
@@ -17,6 +17,11 @@ class MuZeroGameplayConfig:
   depth_limit: int = 1
 
 
+def convert_player_depth_to_jax(arr):
+  return [[jnp.array(p) for p in d] for d in arr]
+
+def convert_depth_to_jax(arr):
+  return [jnp.array(d) for d in arr]
 
 # The main idea is:
 # Create root
@@ -70,9 +75,9 @@ class MuZeroGameplay:
   def prepare_cfr_structure(self, isets, reaches, cf_values, construct_gadget):
     chex.assert_equal(isets.shape[:-1], reaches.shape)
     chex.assert_equal(isets.shape[1:-1], cf_values.shape)
-  
-    dummy_iset = np.zeros_like(isets[0, 0])
-    depth_iset_map = [[dummy_iset], [dummy_iset]] # We create initial dummy iset 0
+   
+    depth_iset_map = [] # We create initial dummy iset 0
+    depth_iset_legal = []
     
     depth_history_action_utility = []
     depth_history_iset = []
@@ -83,9 +88,6 @@ class MuZeroGameplay:
     depth_history_previous_history = []
     depth_history_next_history = []
     # TODO: Do the same thing as with histories? Since we know that each player plays at each turn. 
-    iset_previous_action = []
-    iset_action_mask = []
-    iset_action_depth = []
     
     # TODO: Split the map to be separate for each depth.
     # Because of imperfect recall it does not make sense to have all the isets in the same map.
@@ -107,26 +109,27 @@ class MuZeroGameplay:
           
       isets = np.array(isets)
       actions = isets[..., None] * amount_actions + np.arange(amount_actions)[None, None, ...] 
+      iset_map = [np.array(i) for i in iset_map]
       return iset_map, isets, actions
     
     
     def handle_mvs_layer(curr_iset, prev_iset, prev_action, prev_history):
       iset_map, isets, actions = create_iset_map(curr_iset, self.mvs_actions)
-      #print(isets.shape)
-      mvs_vals = self.muzero.get_mvs_from_abstraction(curr_iset[0], curr_iset[1])
-      #mvs values are from the perspective of player 0
-      transformation_utils = np.stack((mvs_vals, -mvs_vals), axis=0)
-      legal = np.ones((curr_iset.shape[1], 2, self.mvs_actions, self.mvs_actions), dtype=bool)
-      next_history = np.full((curr_iset.shape[1], self.mvs_actions, self.mvs_actions), -1)
       
+      
+      
+      mvs_vals = self.muzero.get_mvs_from_abstraction(curr_iset[0], curr_iset[1])
+      iset_legal = [np.ones(iset_map[pl].shape[:-1] + (self.mvs_actions,)) for pl in range(2)] 
+      legal = np.ones_like(mvs_vals)
+      next_history = np.full_like(mvs_vals, -1, dtype=int)
       depth_iset_map.append(iset_map)
       
       depth_history_previous_iset.append(prev_iset)
       depth_history_previous_action.append(prev_action)
       depth_history_previous_history.append(prev_history)
       
-      
-      depth_history_action_utility.append(transformation_utils)
+      depth_iset_legal.append(iset_legal)
+      depth_history_action_utility.append(mvs_vals)
       depth_history_iset.append(isets)
       depth_history_actions.append(actions) 
       depth_history_legal.append(legal) 
@@ -139,9 +142,11 @@ class MuZeroGameplay:
       iset_map, isets, actions = create_iset_map(curr_iset, self.actions)
       # TODO: Could this be jitted from here onward?
       # What spedup would that bring? Would require to change some indexing to jnp.where 
+      p1_legal_iset, p2_legal_iset = self.muzero.get_both_legal_actions_from_abstraction(iset_map[0], iset_map[1])
+      p1_legal_iset, p2_legal_iset = p1_legal_iset > 0, p2_legal_iset > 0
       
-      p1_legal, p2_legal = self.muzero.get_both_legal_actions_from_abstraction(curr_iset[0], curr_iset[1])
-      p1_legal, p2_legal = p1_legal > 0, p2_legal > 0
+      p1_legal, p2_legal = p1_legal_iset[isets[0]], p2_legal_iset[isets[1]] 
+      iset_legal = [p1_legal_iset, p2_legal_iset]
       legal = p1_legal[..., None] * p2_legal #[..., None, :]
       # If we ever change to Bool[D, H(D),Pl, A], Instead of [D, H(D),A1, A2]
       # legal_stacked = np.stack((p1_legal, p2_legal), 0)
@@ -187,6 +192,7 @@ class MuZeroGameplay:
       next_history = (np.cumsum(non_terminal).reshape(non_terminal.shape) * non_terminal) - 1
       
       depth_iset_map.append(iset_map)
+      depth_iset_legal.append(iset_legal)
       depth_history_action_utility.append(action_utility)
       depth_history_iset.append(isets)
       depth_history_actions.append(actions)
@@ -194,7 +200,10 @@ class MuZeroGameplay:
       depth_history_previous_iset.append(prev_iset)
       depth_history_previous_action.append(prev_action)
       depth_history_previous_history.append(prev_history)
-      depth_history_next_history.append(next_history)
+      depth_history_next_history.append(next_history.astype(int))
+      
+      if np.all(next_history < 0):
+        return
       
       if depth + 1 == self.config.depth_limit:
         handle_mvs_layer(next_isets,
@@ -215,19 +224,24 @@ class MuZeroGameplay:
        
       iset_map, isets, actions = create_iset_map(curr_iset, 2) # Different amount of actions, only 2 for each player
       # TODO: Can these be done better?
+      
       action_utilities = np.zeros((cf_values.shape[0], 2, 2))
       # Resolving player plays the only legal action, while the other terminates the game
       action_utilities[:, 0, 0] = cf_values #
+      iset_legal = [np.ones(iset_map[pl].shape[:-1] + (2,)) for pl in range(2)] 
+      iset_legal[self.config.player][:, 1] = 0
       legals = np.ones((cf_values.shape[0], 2, 2))
-      next_history = np.full((cf_values.shape[0], 2, 2), -1)
+      next_history = np.full((cf_values.shape[0], 2, 2), -1, dtype = int)
       if self.config.player == 0:
         legals[:, 1, :] = 0
+        
         next_history[:, 0, 1] = np.arange(cf_values.shape[0])
       else:
         legals[:, :, 1] = 0 
         next_history[:, 1, 0] = np.arange(cf_values.shape[0])
       
       depth_iset_map.append(iset_map)
+      depth_iset_legal.append(iset_legal)
       depth_history_iset.append(isets)
       depth_history_actions.append(actions)
       depth_history_action_utility.append(action_utilities)
@@ -240,9 +254,9 @@ class MuZeroGameplay:
       next_prev_iset = isets
       # For resolving player action 0, for other the action 1
       action_id = np.array([self.config.player, 1 - self.config.player])
-      next_prev_action = isets[..., None] * 2 + action_id[None, None, ...]
+      next_prev_actions = isets  * 2 + action_id[:, None]
       next_prev_history = np.arange(len(prev_history))
-      handle_single_layer(curr_iset, next_prev_iset, next_prev_action, next_prev_history, 0)   
+      handle_single_layer(curr_iset, next_prev_iset, next_prev_actions, next_prev_history, 0)   
        
     prev_iset = np.zeros_like(reaches, dtype=np.int64)
     prev_action = np.zeros_like(reaches, dtype=np.int64)
@@ -253,25 +267,36 @@ class MuZeroGameplay:
     else:
       handle_single_layer(isets, prev_iset, prev_action, prev_history, 0)
 
-    return MuZeroCFRConstants(
+    init_reaches = jnp.copy(reaches)
+    init_condition = jnp.array([self.config.player == 0, self.config.player == 1])
+    init_reaches = jnp.where(init_condition[..., None], init_reaches, 1) 
+    
+    constants = MuZeroCFRConstants(
       max_depth = len(depth_history_iset),
+      resolving_player = self.config.player,
+      
+      init_reaches = init_reaches,
       
       depth_actions = [a.shape[-1] for a in depth_history_actions],
-      depth_iset_map = depth_iset_map,
+      depth_iset_map = convert_player_depth_to_jax(depth_iset_map),
+      depth_iset_legal = convert_player_depth_to_jax(depth_iset_legal),
       
-      depth_history_action_utility = np.array(depth_history_action_utility),
-      depth_history_iset = np.array(depth_history_iset),
-      depth_history_actions = np.array(depth_history_actions),
-      depth_history_legal = np.array(depth_history_legal),
-      depth_history_previous_iset = np.array(depth_history_previous_iset),
-      depth_history_previous_action = np.array(depth_history_previous_action),
-      depth_history_previous_history = np.array(depth_history_previous_history),
-      depth_history_next_history = np.array(depth_history_next_history),
-      
+      depth_history_action_utility = convert_depth_to_jax(depth_history_action_utility),
+      depth_history_iset = convert_depth_to_jax(depth_history_iset),
+      depth_history_actions = convert_depth_to_jax(depth_history_actions),
+      depth_history_legal = convert_depth_to_jax(depth_history_legal),
+      depth_history_previous_iset = convert_depth_to_jax(depth_history_previous_iset),
+      depth_history_previous_action = convert_depth_to_jax(depth_history_previous_action),
+      depth_history_previous_history = convert_depth_to_jax(depth_history_previous_history),
+      depth_history_next_history = convert_depth_to_jax(depth_history_next_history),
     )
+    cfr = MuZeroCFR(constants)
+    
+    return cfr
     
 
   def run_cfr(self, cfr):
+    cfr.multiple_steps(10)
     pass  
    
   # Returns either policy or None. latter is that the policy is not computed yet.
@@ -283,6 +308,7 @@ class MuZeroGameplay:
     if optional_policy is not None:
       return np.random.choice(self.actions, p=optional_policy)
     construct_gadget = not self.new_game
+    construct_gadget = True
     if self.new_game:
       self.new_game = False
       isets = self.build_initial_root(public_state, iset)
@@ -292,7 +318,7 @@ class MuZeroGameplay:
     else:
       isets, reaches, cf_values= self.find_root_from_previous(public_state, iset) 
       
-    cfr = self.prepare_cfr_structure(isets, reaches, cf_values, True)
+    cfr = self.prepare_cfr_structure(isets, reaches, cf_values, construct_gadget)
     
     policy = self.run_cfr(cfr)
     return np.random.choice(self.actions, p=policy)
