@@ -5,6 +5,8 @@ import jax.numpy as jnp
 import functools
 
 
+def check_iset_similarity(iset1, iset2, threshold=0.1):
+  return jnp.mean(jnp.abs(iset1 - iset2)) < threshold
 
 
 def regret_matching(regret, mask): 
@@ -62,8 +64,8 @@ class MuZeroCFR:
     
     self.timestep = 1
     
-    self.regrets = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0], a)) for pl in range(2)] for d, a in enumerate(constants.depth_actions)]
-    self.averages = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0], a)) for pl in range(2)] for d, a in enumerate(constants.depth_actions)]
+    self.regrets = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0], a)) for pl in range(self.players)] for d, a in enumerate(constants.depth_actions)]
+    self.averages = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0], a)) for pl in range(self.players)] for d, a in enumerate(constants.depth_actions)]
     
     self.regret_matching = jax.vmap(regret_matching, in_axes=(0, 0), out_axes=0)
     
@@ -75,7 +77,7 @@ class MuZeroCFR:
     """Wrapper around the jitted function for performing CFR step."""
     averaging_coefficient = self.timestep if self._linear_averaging else 1
     if self._alternating_updates:
-      for player in range(2):
+      for player in range(self.players):
         self.regrets, self.averages = self.jit_step(
             self.regrets, self.averages, averaging_coefficient, player
         )
@@ -89,20 +91,28 @@ class MuZeroCFR:
       )
 
     self.timestep += 1
+  
+  # TODO: It would be better to exactly know which depth you are searching and compute the similarity for each iset in that depth and select the one with minimal difference. This would avoid possibility of  not finding correct iset.
+  def get_strategy(self, iset, player):
+    for d in range(self.constants.max_depth):
+      for i in range(self.constants.depth_iset_map[d][player].shape[0]):
+        if check_iset_similarity(iset, self.constants.depth_iset_map[d][player][i]):
+          return self.averages[d][player][i] / jnp.sum(self.averages[d][player][i])
+    assert False, "No strategy found for iset"
     
   # Is it okay to compile for each player separately?
-  # @functools.partial(jax.jit, static_argnums=(0, 4))
+  @functools.partial(jax.jit, static_argnums=(0, 4))
   def jit_step(self, regrets, averages, average_policy_update_coefficient, player):
     
-    current_strategies = [[self.regret_matching(regrets[d][pl], self.constants.depth_iset_legal[d][pl]) for pl in range(2)] for d in range(self.constants.max_depth)]
+    current_strategies = [[self.regret_matching(regrets[d][pl], self.constants.depth_iset_legal[d][pl]) for pl in range(self.players)] for d in range(self.constants.max_depth)]
     
     
   
     history_reaches = [self.constants.init_reaches]
-    history_strategies = [jnp.stack([current_strategies[d][pl][self.constants.depth_history_iset[d][pl]] for pl in range(2)], axis=0) for d in range(self.constants.max_depth)]
+    history_strategies = [jnp.stack([current_strategies[d][pl][self.constants.depth_history_iset[d][pl]] for pl in range(self.players)], axis=0) for d in range(self.constants.max_depth)]
     
     
-    for d in range(self.constants.max_depth-1):
+    for d in range(self.constants.max_depth):
       strategy_realization = history_reaches[d][..., None] * history_strategies[d]
       # averages[d][0] = 
       p1_iset_realizations = jnp.bincount(self.constants.depth_history_actions[d][0].ravel(), strategy_realization[0].ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][0].shape[0]).reshape(averages[d][0].shape)
@@ -111,6 +121,10 @@ class MuZeroCFR:
       # TODO: This does not update averages in the last depth, also the history_reaches are for both players, but you need only a single player for both this and CF-values
       averages[d][0] = averages[d][0] + p1_iset_realizations * average_policy_update_coefficient
       averages[d][1] = averages[d][1] + p2_iset_realizations * average_policy_update_coefficient
+      
+      # We do not compute the next history, since there is none
+      if d == self.constants.max_depth - 1:
+        break
       
       p1_masked_realization = strategy_realization[0, ..., None] * (self.constants.depth_history_next_history[d] >= 0)
       
@@ -130,18 +144,18 @@ class MuZeroCFR:
       action_value = jnp.where(self.constants.depth_history_next_history[d] >= 0, depth_utils[-1][self.constants.depth_history_next_history[d]], self.constants.depth_history_action_utility[d])
       # action_value = self.constants.depth_history_action_utility[d] + depth_utils[-1][self.constants.depth_history_next_history[d]] * (self.constants.depth_history_next_history[d] >= 0)
       action_probabilities = history_strategies[d][0,..., None] * history_strategies[d][1, :, None, ...]
-      p1_value = jnp.sum(action_value * action_probabilities, axis=-1)
-      p2_value = jnp.sum(action_value * action_probabilities, axis=-2)
+      p1_value = jnp.sum(action_value * history_strategies[d][1, :, None, ...], axis=-1)
+      p2_value = jnp.sum(action_value * history_strategies[d][0,..., None], axis=-2)
       history_value = jnp.sum(action_value * action_probabilities, axis=(-1, -2))
       depth_utils.append(history_value)
       p1_cf_regret = (p1_value - history_value[..., None]) * jnp.expand_dims(history_reaches[d][1], -1)
       p2_cf_regret = (p2_value - history_value[..., None]) * jnp.expand_dims(history_reaches[d][0], -1)
       
       p1_bin_regrets = jnp.bincount(self.constants.depth_history_actions[d][0].ravel(), p1_cf_regret.ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][0].shape[0]).reshape(regrets[d][0].shape)
-      p2_bin_regrets = jnp.bincount(self.constants.depth_history_actions[d][1].ravel(), p2_cf_regret.ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][1].shape[0]).reshape(regrets[d][0].shape)
+      p2_bin_regrets = jnp.bincount(self.constants.depth_history_actions[d][1].ravel(), p2_cf_regret.ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][1].shape[0]).reshape(regrets[d][1].shape)
       
-      regrets[d][0] = regrets[d][0] + p1_bin_regrets
-      regrets[d][1] = regrets[d][1] - p2_bin_regrets
+      regrets[d][0] = jnp.maximum(regrets[d][0] + p1_bin_regrets, 0.0)
+      regrets[d][1] = jnp.maximum(regrets[d][1] - p2_bin_regrets, 0.0)
       
       
       # history_value = jnp.sum(action_value *)

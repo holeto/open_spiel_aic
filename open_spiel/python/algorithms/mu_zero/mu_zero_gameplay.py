@@ -9,7 +9,7 @@ import queue
 
 from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
 from open_spiel.python.algorithms.mu_zero.mu_zero import MuZeroTrain
-from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFRConstants, MuZeroCFR
+from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFRConstants, MuZeroCFR, check_iset_similarity
 
 @chex.dataclass(frozen=True)
 class MuZeroGameplayConfig:
@@ -76,14 +76,14 @@ class MuZeroGameplay:
     q = queue()
     def check_visited(new_iset):
       for iset in visited:
-        if self.check_iset_similarity(iset, new_iset):
+        if check_iset_similarity(iset, new_iset):
           return True
       return False
     def add_by_iset(iset, player):
       num_isets = last_layer_isets[player].shape[0]
       for i in range(num_isets):
         pl_iset = last_layer_isets[player][i]
-        if self.check_iset_similarity(pl_iset, iset):
+        if check_iset_similarity(pl_iset, iset):
           opp_iset = last_layer_isets[1 - player][i]
           state = []
           if player == 0:
@@ -111,8 +111,6 @@ class MuZeroGameplay:
     return pub_state, last_layer_reaches
 
   
-  def check_iset_similarity(self, iset1, iset2):
-    return False
   
   # def check_pub_state_intersection(self, iset, public_state):
   #   return False
@@ -149,7 +147,7 @@ class MuZeroGameplay:
         for i in range(curr_iset.shape[1]): 
           curr_index = -1
           for j in range(first_iset_id, len(iset_map[pl])):
-            if self.check_iset_similarity(iset_map[pl][j], curr_iset[pl, i]):
+            if check_iset_similarity(iset_map[pl][j], curr_iset[pl, i]):
               curr_index = j
               break
           if curr_index < 0:
@@ -197,9 +195,9 @@ class MuZeroGameplay:
       
       p1_legal, p2_legal = p1_legal_iset[isets[0]], p2_legal_iset[isets[1]] 
       iset_legal = [p1_legal_iset, p2_legal_iset]
-      legal = p1_legal[..., None] * p2_legal #[..., None, :]
+      legal = p1_legal[..., None] * p2_legal[..., None, :]
       # If we ever change to Bool[D, H(D),Pl, A], Instead of [D, H(D),A1, A2]
-      legal_stacked = np.stack((p1_legal, p2_legal), 0)
+      # legal_stacked = np.stack((p1_legal, p2_legal), 0)
       
       
       # Even with in dimension -1, we want output dimension to be before the last dimension.
@@ -207,10 +205,9 @@ class MuZeroGameplay:
       vectorized_abstraction = jax.vmap(jax.vmap(self.muzero.get_next_state_from_abstraction, in_axes=(None, None, -1, -1), out_axes=(-2, -2, -2, -2)), in_axes=(None, None, -1, -1), out_axes=(-2, -2, -2, -2))
       
       # TODO: Can this be done better so we do not have to copy the actions for each player, but so that we can just use it as it is.
-      p1_actions = np.repeat(np.arange(self.actions)[None, ...], self.actions, axis=0)
-      p1_actions = np.repeat(p1_actions[None, ...], curr_iset.shape[1], axis= 0) # Repeats for each history
-      #TODO: Is this correct? Will it not be always identical to p1_actions?
-      p2_actions = np.transpose(p1_actions, (0, 2, 1))
+      
+      p2_actions = np.tile(np.arange(self.actions), (curr_iset.shape[1], self.actions, 1))  
+      p1_actions = np.transpose(p2_actions, (0, 2, 1))
       next_p1_isets, next_p2_isets, next_utilities, next_terminal = vectorized_abstraction(curr_iset[0], curr_iset[1], p1_actions, p2_actions) 
       
       action_utility = legal * next_utilities[..., 0] # We will select only utilities of player 0. We can do some more fancy stuff here, but whatever.
@@ -348,8 +345,8 @@ class MuZeroGameplay:
     
 
   def run_cfr(self, cfr):
-    cfr.multiple_steps(10)
-    pass  
+    cfr.multiple_steps(self.config.resolve_iterations)
+     
    
   # Returns either policy or None. latter is that the policy is not computed yet.
   def get_policy(self, iset):
@@ -359,11 +356,13 @@ class MuZeroGameplay:
     return self.policy[iset_str]
     
   def get_action(self, public_state, iset):
+    
+    abstracted_iset = self.muzero.get_abstraction(public_state, iset, self.config.player)
     optional_policy = self.get_policy(iset)
     if optional_policy is not None:
       return np.random.choice(self.actions, p=optional_policy)
     construct_gadget = not self.new_game
-    construct_gadget = True
+    # construct_gadget = True
     if self.new_game:
       self.new_game = False
       isets = self.build_initial_root(public_state, iset)
@@ -373,9 +372,10 @@ class MuZeroGameplay:
     else:
       isets, reaches, cf_values= self.find_root_from_previous(public_state, iset) 
       
+    # TODO: Refactor this.
     cfr = self.prepare_cfr_structure(isets, reaches, cf_values, construct_gadget)
-    
-    policy = self.run_cfr(cfr)
+    self.run_cfr(cfr)
+    policy = cfr.get_strategy(abstracted_iset, self.config.player)
     return np.random.choice(self.actions, p=policy)
   
   
