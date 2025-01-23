@@ -5,6 +5,7 @@ import jax.lax as lax
 
 import chex
 import numpy as np
+import queue
 
 from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
 from open_spiel.python.algorithms.mu_zero.mu_zero import MuZeroTrain
@@ -36,6 +37,7 @@ class MuZeroGameplay:
     self.new_game = True # flag that specifies whether we are at the beginning of the game or whether we have moved
     
     self.init_isets = self.initialize_isets()
+    self.policy = None
     
   def initialize_isets(self):
     if isinstance(self.muzero.game, JaxOriginalGoofspiel):
@@ -58,14 +60,62 @@ class MuZeroGameplay:
     p1_iset, p2_iset = self.muzero.get_both_abstraction(public_state, *self.init_isets)
     return np.stack((p1_iset[None, ...], p2_iset[None, ...]), 0) # Shape would be [Pl, 1, Iset]
   
-  def find_root_from_previous(self, public_state, iset):
+  def find_root_from_previous(self, cfr : MuZeroCFR, public_state, iset):
   # We are passing public state and infoset separately, but from iset you should be able to get public state ideally.
-    pass
-    #End this method by clearing the previous tree
-    # self.clear_tree()
+    realization_plans = cfr.propagate_strategy(cfr.averages)
+    #[D, Pl, S(D)]
+    reaches = jnp.sum(realization_plans, axis = -1)
+    #interested in the reaches for the resolving player in the last layer
+    #[S(D)]
+    last_layer_reaches = reaches[-1, self.config.player, :]
+    #list [S(D)][S(D)]
+    last_layer_isets = [cfr.constants.depth_iset_map[-1][pl][cfr.constants.depth_history_iset[-1][pl]] for pl in range(2)]
+    pub_state = []
+    #TODO: Naive version
+    visited = []
+    q = queue()
+    def check_visited(new_iset):
+      for iset in visited:
+        if self.check_iset_similarity(iset, new_iset):
+          return True
+      return False
+    def add_by_iset(iset, player):
+      num_isets = last_layer_isets[player].shape[0]
+      for i in range(num_isets):
+        pl_iset = last_layer_isets[player][i]
+        if self.check_iset_similarity(pl_iset, iset):
+          opp_iset = last_layer_isets[1 - player][i]
+          state = []
+          if player == 0:
+            state.append(pl_iset)
+            state.append(opp_iset)
+          else:
+            state.append(opp_iset)
+            state.append(pl_iset)
+          q.enqueue(state)
+      return q
+    q = add_by_iset(iset, self.config.player)
+    visited.append(iset)
+    while not q.empty():
+      p1_iset, p2_iset = q.dequeue()
+      pub_state.append([p1_iset, p2_iset])
+      if not check_visited(p1_iset):
+        add_by_iset(p1_iset, 0)
+        visited.append(iset)
+      elif not check_visited(p2_iset):
+        add_by_iset(p2_iset, 0)
+        visited.append(p2_iset)
+      
+    #TODO: Pick only last layer reaches which are for isets in public state
+    #TODO: Return also CF values from the CFR
+    return pub_state, last_layer_reaches
+
   
   def check_iset_similarity(self, iset1, iset2):
     return False
+  
+  # def check_pub_state_intersection(self, iset, public_state):
+  #   return False
    
   def validate_terminal(self, terminal, threshold: float = 0.5):
     return terminal < threshold
@@ -149,7 +199,7 @@ class MuZeroGameplay:
       iset_legal = [p1_legal_iset, p2_legal_iset]
       legal = p1_legal[..., None] * p2_legal #[..., None, :]
       # If we ever change to Bool[D, H(D),Pl, A], Instead of [D, H(D),A1, A2]
-      # legal_stacked = np.stack((p1_legal, p2_legal), 0)
+      legal_stacked = np.stack((p1_legal, p2_legal), 0)
       
       
       # Even with in dimension -1, we want output dimension to be before the last dimension.
@@ -183,6 +233,8 @@ class MuZeroGameplay:
       next_prev_isets = isets[:, nonzeros[0]]
       next_prev_actions = both_actions[:, *nonzeros]
       next_prev_actions = next_prev_isets * self.actions + next_prev_actions
+      #TODO Maybe this will be too slow and can be done in better way
+      iset_prev_action = np.unique(next_prev_actions)
       
       # This should be easy, just for each nonzero terminal create value based on it's index in first dimension
       next_prev_history = nonzeros[0]
@@ -301,7 +353,10 @@ class MuZeroGameplay:
    
   # Returns either policy or None. latter is that the policy is not computed yet.
   def get_policy(self, iset):
-    return None
+    iset_str = jnp.array_str(iset)
+    if self.policy is None or iset_str not in self.policy:
+      return None
+    return self.policy[iset_str]
     
   def get_action(self, public_state, iset):
     optional_policy = self.get_policy(iset)

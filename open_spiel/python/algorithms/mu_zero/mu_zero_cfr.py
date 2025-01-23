@@ -31,6 +31,7 @@ class MuZeroCFRConstants:
   #   D -> Depth
   #   Pl -> Amount of players
   #   H(D) -> Amount of histories at depth H(D)
+  #   S(D) -> Amount of infosets at depth D
   #   A -> Actions of a player (has to be in junction with Pl)
   #   A1 -> Actions of P1
   #   A2 -> Actions of P2
@@ -46,14 +47,15 @@ class MuZeroCFRConstants:
 
   depth_history_next_history: chex.ArrayTree = () # Int[D, H(D), A1, A2]
 
-  iset_previous_action: chex.ArrayTree = ()
-  iset_action_mask: chex.ArrayTree = ()
-  iset_action_depth: chex.ArrayTree = ()
+  iset_previous_action: chex.ArrayTree = () #Int[D, PL, S(D)]
+  iset_action_mask: chex.ArrayTree = () #Int [D, PL, A]
+  iset_action_depth: chex.ArrayTree = () 
   
   
 class MuZeroCFR:
   def __init__(self, constants: MuZeroCFRConstants):
     self.constants = constants
+    self.players = 2
     self._linear_averaging = True
     self._regret_matching_plus = True
     self._alternating_updates = True
