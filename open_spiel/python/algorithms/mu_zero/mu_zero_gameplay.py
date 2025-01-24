@@ -60,55 +60,84 @@ class MuZeroGameplay:
     p1_iset, p2_iset = self.muzero.get_both_abstraction(public_state, *self.init_isets)
     return np.stack((p1_iset[None, ...], p2_iset[None, ...]), 0) # Shape would be [Pl, 1, Iset]
   
+
   def find_root_from_previous(self, cfr : MuZeroCFR, public_state, iset):
   # We are passing public state and infoset separately, but from iset you should be able to get public state ideally.
-    realization_plans = cfr.propagate_strategy(cfr.averages)
-    #[D, Pl, S(D)]
-    reaches = jnp.sum(realization_plans, axis = -1)
+    #TODO: Propagate the current reaches in CFR
+    # and return per history reaches
+    reaches = cfr.propagate_history_reaches(cfr.averages)
     #interested in the reaches for the resolving player in the last layer
     #[S(D)]
     last_layer_reaches = reaches[-1, self.config.player, :]
-    #list [S(D)][S(D)]
-    last_layer_isets = [cfr.constants.depth_iset_map[-1][pl][cfr.constants.depth_history_iset[-1][pl]] for pl in range(2)]
-    pub_state = []
-    #TODO: Naive version
-    visited = []
-    q = queue()
-    def check_visited(new_iset):
-      for iset in visited:
-        if check_iset_similarity(iset, new_iset):
-          return True
-      return False
-    def add_by_iset(iset, player):
-      num_isets = last_layer_isets[player].shape[0]
-      for i in range(num_isets):
-        pl_iset = last_layer_isets[player][i]
+    #[Pl,H(D)]
+    last_layer_iset_indices = jnp.stack([cfr.constants.depth_history_iset[-1][pl] for pl in range(2)], axis=0)
+    #Assuming equal number of isets for both player
+    num_isets = last_layer_iset_indices[self.config.player].shape[0]
+    #[Pl,H(D)]
+    last_layer_isets = jnp.stack([cfr.constants.depth_iset_map[-1][pl][last_layer_iset_indices[pl]] for pl in range(2)], axis=0)
+    #Find idx of the initial iset
+    #TODO: This could surely be improved
+    start_iset_idx = 0
+    for i in range(num_isets):
+        pl_iset = last_layer_isets[self.config.player][i]
         if check_iset_similarity(pl_iset, iset):
-          opp_iset = last_layer_isets[1 - player][i]
-          state = []
-          if player == 0:
-            state.append(pl_iset)
-            state.append(opp_iset)
-          else:
-            state.append(opp_iset)
-            state.append(pl_iset)
-          q.enqueue(state)
-      return q
-    q = add_by_iset(iset, self.config.player)
-    visited.append(iset)
-    while not q.empty():
-      p1_iset, p2_iset = q.dequeue()
-      pub_state.append([p1_iset, p2_iset])
-      if not check_visited(p1_iset):
-        add_by_iset(p1_iset, 0)
-        visited.append(iset)
-      elif not check_visited(p2_iset):
-        add_by_iset(p2_iset, 0)
-        visited.append(p2_iset)
+          #start_iset_idx = last_layer_iset_indices[self.config.player][i]
+          start_iset_idx = i
+          break
+    #The version using public state decoder
+    #TODO: Not sure if this is correct
+    vectorized_decoder = jax.vmap(jax.vmap(self.muzero.get_decoded_public_state, in_axes=(-1, None), out_axes=-1), in_axes=(0, 0), out_axes=0)
+    vectorized_compare = jax.vmap(jax.vmap(check_iset_similarity, in_axes=(-1, None), out_axes=-1), in_axes=(0, None), out_axes=0)
+    players = jnp.arange(2)
+    #Should be [Pl, H(D)]
+    last_layer_pub_states = vectorized_decoder(last_layer_isets, players)
+    reference_pub_state = last_layer_pub_states[self.config.player][start_iset_idx]
+    #Should be [Pl, H(D)]
+    pub_state_mask_pl = vectorized_compare(last_layer_pub_states, reference_pub_state)
+    #[H(D)]
+    pub_state_mask = jnp.logical_and(pub_state_mask_pl[0], pub_state_mask[1]).flatten()
+    found_node_indices = pub_state_mask.nonzero()
+    #TODO: Returning it like this assumes that the reaches have shape H(D)
+    # and returns reaches per history. Would that be a problem?
+    #TODO: Add CF values to the CFR and return them
+    return jnp.stack(last_layer_isets[0][found_node_indices], last_layer_isets[1][found_node_indices], axis = 0), last_layer_reaches[found_node_indices]
+    #This is a version without using the public state decoder
+    #TODO: Naive version
+    # pub_state = []
+    # visited = [[], []]
+    # q = queue()
+    # def check_visited(new_iset_idx, player):
+    #   for iset_idx in visited[player]:
+    #     if iset_idx == new_iset_idx:
+    #       return True
+    #   return False
+    # def add_by_iset(iset_to_add, player):
+    #   for i in range(num_isets):
+    #     pl_iset = last_layer_isets[player][i]
+    #     if check_iset_similarity(pl_iset, iset_to_add):
+    #       opp_iset = last_layer_isets[1 - player][i]
+    #       state = []
+    #       if player == 0:
+    #         state.append(pl_iset)
+    #         state.append(opp_iset)
+    #       else:
+    #         state.append(opp_iset)
+    #         state.append(pl_iset)
+    #       opp_iset_idx = last_layer_iset_indices[1 - player][i]
+    #       q.enqueue((opp_iset_idx, opp_iset, 1 - player))
+    #       public_state.append(state)
+    #   return q
+    # q = add_by_iset(iset, self.config.player)
+    # visited[self.config.player].append(start_iset_idx)
+    # while not q.empty():
+    #   opp_iset_idx, opp_iset, player = q.dequeue()
+    #   if not check_visited(opp_iset_idx, player):
+    #     add_by_iset(opp_iset, 0)
+    #     visited[player].append(iset)
       
     #TODO: Pick only last layer reaches which are for isets in public state
     #TODO: Return also CF values from the CFR
-    return pub_state, last_layer_reaches
+    #return pub_state, last_layer_reaches[visited[self.config.player]]
 
   
   
@@ -199,7 +228,7 @@ class MuZeroGameplay:
       
       # TODO: Can this be done better so we do not have to copy the actions for each player, but so that we can just use it as it is.
       
-      p2_actions = np.tile(np.arange(self.actions), (curr_iset.shape[1], self.actions, 1))  
+      p2_actions = np.tile(np.arange(self.actions), (curr_iset.shape[1], self.actions, 1)) 
       p1_actions = np.transpose(p2_actions, (0, 2, 1))
       next_p1_isets, next_p2_isets, next_utilities, next_terminal = vectorized_abstraction(curr_iset[0], curr_iset[1], p1_actions, p2_actions) 
       
