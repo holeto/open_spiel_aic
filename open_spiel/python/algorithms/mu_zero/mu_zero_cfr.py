@@ -52,7 +52,7 @@ class MuZeroCFR:
     
     self.regrets = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0], a)) for pl in range(self.players)] for d, a in enumerate(constants.depth_actions)]
     self.averages = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0], a)) for pl in range(self.players)] for d, a in enumerate(constants.depth_actions)]
-    self.cf_values = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0])) for pl in range(self.players)] for d, _ in enumerate(constants.depth_actions)]
+    self.cf_values = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0]),) for pl in range(self.players)] for d, _ in enumerate(constants.depth_actions)]
     
     self.regret_matching = jax.vmap(regret_matching, in_axes=(0, 0), out_axes=0)
     
@@ -88,6 +88,9 @@ class MuZeroCFR:
         if check_iset_similarity(iset, self.constants.depth_iset_map[d][player][i]):
           return self.averages[d][player][i] / jnp.sum(self.averages[d][player][i])
     assert False, "No strategy found for iset"
+
+  def get_last_depth_player_cf_values(self, player):
+    return self.cf_values[-1][player][self.constants.depth_history_iset[-1][player]]
     
   # Is it okay to compile for each player separately?
   @functools.partial(jax.jit, static_argnums=(0, 5))

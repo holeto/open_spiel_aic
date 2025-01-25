@@ -37,7 +37,8 @@ class MuZeroGameplay:
     self.new_game = True # flag that specifies whether we are at the beginning of the game or whether we have moved
     
     self.init_isets = self.initialize_isets()
-    self.policy = None
+    self.prev_solver = None
+    self.policy = {}
     
   def initialize_isets(self):
     if isinstance(self.muzero.game, JaxOriginalGoofspiel):
@@ -61,49 +62,50 @@ class MuZeroGameplay:
     return np.stack((p1_iset[None, ...], p2_iset[None, ...]), 0) # Shape would be [Pl, 1, Iset]
   
 
-  def find_root_from_previous(self, cfr : MuZeroCFR, public_state, iset):
+  def find_root_from_previous(self, public_state, iset):
   # We are passing public state and infoset separately, but from iset you should be able to get public state ideally.
+    #interested in the reaches for the resolving player in the last layer
+    last_layer_CF_vals = self.prev_solver.get_last_depth_player_cf_values(self.config.player)
+    #abstracted_iset = self.muzero.get_abstraction(public_state, iset, self.config.player)
     #TODO: Propagate the current reaches in CFR
     # and return per history reaches
-    reaches = cfr.propagate_history_reaches(cfr.averages)
-    #interested in the reaches for the resolving player in the last layer
-    #[S(D)]
-    last_layer_reaches = reaches[-1, self.config.player, :]
+    #[H(D)]
+    #last_layer_reaches = self.prev_solver.propagate_history_reaches(self.prev_solver.averages)
+    last_layer_reaches = jnp.ones_like(last_layer_CF_vals)
     #[Pl,H(D)]
-    last_layer_iset_indices = jnp.stack([cfr.constants.depth_history_iset[-1][pl] for pl in range(2)], axis=0)
+    last_layer_iset_indices = jnp.stack([self.prev_solver.constants.depth_history_iset[-1][pl] for pl in range(2)], axis=0)
     #Assuming equal number of isets for both player
     num_isets = last_layer_iset_indices[self.config.player].shape[0]
     #[Pl,H(D)]
-    last_layer_isets = jnp.stack([cfr.constants.depth_iset_map[-1][pl][last_layer_iset_indices[pl]] for pl in range(2)], axis=0)
-    #Find idx of the initial iset
-    #TODO: This could surely be improved
-    start_iset_idx = 0
-    for i in range(num_isets):
-        pl_iset = last_layer_isets[self.config.player][i]
-        if check_iset_similarity(pl_iset, iset):
-          #start_iset_idx = last_layer_iset_indices[self.config.player][i]
-          start_iset_idx = i
-          break
+    last_layer_isets = jnp.stack([self.prev_solver.constants.depth_iset_map[-1][pl][last_layer_iset_indices[pl]] for pl in range(2)], axis=0)
     #The version using public state decoder
-    #TODO: Not sure if this is correct
-    vectorized_decoder = jax.vmap(jax.vmap(self.muzero.get_decoded_public_state, in_axes=(-1, None), out_axes=-1), in_axes=(0, 0), out_axes=0)
-    vectorized_compare = jax.vmap(jax.vmap(check_iset_similarity, in_axes=(-1, None), out_axes=-1), in_axes=(0, None), out_axes=0)
-    players = jnp.arange(2)
+    vectorized_decoder = jax.vmap(self.muzero.get_decoded_public_state, in_axes=(0, None), out_axes=0)
+    vectorized_compare = jax.vmap(jax.vmap(check_iset_similarity, in_axes=(0, None), out_axes=0), in_axes=(0, None), out_axes=0)
+    last_layer_pub_states = []
+    for pl in range(2):
+      last_layer_pub_states.append(vectorized_decoder(last_layer_isets[pl], pl))
+    last_layer_pub_states = jnp.stack(last_layer_pub_states, axis=0)
     #Should be [Pl, H(D)]
-    last_layer_pub_states = vectorized_decoder(last_layer_isets, players)
-    reference_pub_state = last_layer_pub_states[self.config.player][start_iset_idx]
-    #Should be [Pl, H(D)]
-    pub_state_mask_pl = vectorized_compare(last_layer_pub_states, reference_pub_state)
+    pub_state_mask_pl = vectorized_compare(last_layer_pub_states, public_state)
     #[H(D)]
-    pub_state_mask = jnp.logical_and(pub_state_mask_pl[0], pub_state_mask[1]).flatten()
+    pub_state_mask = jnp.logical_and(pub_state_mask_pl[0], pub_state_mask_pl[1]).flatten()
     found_node_indices = pub_state_mask.nonzero()
+    stacked_nodes = jnp.stack([last_layer_isets[0][found_node_indices], last_layer_isets[1][found_node_indices]], axis = 0)
     #TODO: Returning it like this assumes that the reaches have shape H(D)
     # and returns reaches per history. Would that be a problem?
     #TODO: Add CF values to the CFR and return them
-    return jnp.stack(last_layer_isets[0][found_node_indices], last_layer_isets[1][found_node_indices], axis = 0), last_layer_reaches[found_node_indices]
+    return stacked_nodes[:, None, :], last_layer_reaches[found_node_indices], last_layer_CF_vals[found_node_indices]
     #This is a version without using the public state decoder
     #TODO: Naive version
     # pub_state = []
+    #Find idx of the initial iset
+    # start_iset_idx = 0
+    # for i in range(num_isets):
+    #     pl_iset = last_layer_isets[self.config.player][i]
+    #     if check_iset_similarity(pl_iset, iset):
+    #       start_iset_idx = last_layer_iset_indices[self.config.player][i]
+    #       #start_iset_idx = i
+    #       break
     # visited = [[], []]
     # q = queue()
     # def check_visited(new_iset_idx, player):
@@ -335,7 +337,7 @@ class MuZeroGameplay:
   # Returns either policy or None. latter is that the policy is not computed yet.
   def get_policy(self, iset):
     iset_str = jnp.array_str(iset)
-    if self.policy is None or iset_str not in self.policy:
+    if iset_str not in self.policy:
       return None
     return self.policy[iset_str]
     
@@ -354,12 +356,17 @@ class MuZeroGameplay:
       reaches = np.ones((2, isets.shape[1]))
       cf_values = np.zeros((isets.shape[1],))
     else:
-      isets, reaches, cf_values= self.find_root_from_previous(public_state, iset) 
+      isets, reaches, cf_values= self.find_root_from_previous(public_state, iset)
       
     # TODO: Refactor this.
     cfr = self.prepare_cfr_structure(isets, reaches, cf_values, construct_gadget)
     self.run_cfr(cfr)
     policy = cfr.get_strategy(abstracted_iset, self.config.player)
+    self.prev_solver = cfr
+    policy = np.asarray(policy, dtype="float64")
+    policy /= np.sum(policy)
+    #just in case
+    self.policy[jnp.array_str(iset)] = policy
     return np.random.choice(self.actions, p=policy)
   
   
