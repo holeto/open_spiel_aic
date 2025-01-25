@@ -65,7 +65,7 @@ class MuZeroGameplay:
   # We are passing public state and infoset separately, but from iset you should be able to get public state ideally.
     #TODO: Propagate the current reaches in CFR
     # and return per history reaches
-    reaches = cfr.propagate_history_reaches(cfr.averages)
+    reaches = cfr.find_reaches_from_average()
     #interested in the reaches for the resolving player in the last layer
     #[S(D)]
     last_layer_reaches = reaches[-1, self.config.player, :]

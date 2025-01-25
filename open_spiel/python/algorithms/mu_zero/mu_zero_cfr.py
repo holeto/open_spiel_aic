@@ -89,6 +89,33 @@ class MuZeroCFR:
           return self.averages[d][player][i] / jnp.sum(self.averages[d][player][i])
     assert False, "No strategy found for iset"
     
+  def find_reaches_from_average(self):
+    averages = [[self.averages[d][pl] / jnp.sum(self.averages[d][pl], axis=-1, keepdims=True) for pl in range(self.players)] for d in range(self.constants.max_depth)]
+    return self.propagate_reaches(averages)
+    
+  # TODO: Could this be connected to jit_step?
+  def find_reaches(self, strategies):
+  
+    history_reaches = [self.constants.init_reaches]
+    history_strategies = [jnp.stack([strategies[d][pl][self.constants.depth_history_iset[d][pl]] for pl in range(self.players)], axis=0) for d in range(self.constants.max_depth)]
+    
+    
+    for d in range(self.constants.max_depth - 1):
+      strategy_realization = history_reaches[d][..., None] * history_strategies[d]
+       
+      
+      p1_masked_realization = strategy_realization[0, ..., None] * (self.constants.depth_history_next_history[d] >= 0)
+      
+      p2_masked_realization = strategy_realization[1, :, None, ...] * (self.constants.depth_history_next_history[d] >= 0)
+      
+      
+      p1_reaches_next = jnp.bincount(self.constants.depth_history_next_history[d].ravel(), p1_masked_realization.ravel(), length=self.constants.depth_history_next_history[d+1].shape[0])
+      p2_reaches_next = jnp.bincount(self.constants.depth_history_next_history[d].ravel(), p2_masked_realization.ravel(), length=self.constants.depth_history_next_history[d+1].shape[0])
+      
+      history_reaches.append(jnp.stack([p1_reaches_next, p2_reaches_next], axis=0))
+    return history_reaches
+    
+    
   # Is it okay to compile for each player separately?
   @functools.partial(jax.jit, static_argnums=(0, 5))
   def jit_step(self, regrets, averages, cf_values, average_policy_update_coefficient, player, iteration):

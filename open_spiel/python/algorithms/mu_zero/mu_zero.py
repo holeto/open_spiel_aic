@@ -2097,6 +2097,7 @@ class MuZeroTrain():
       self.optimizers.iset_encoder_optimizer[pl].state = state["optimizers"].iset_encoder_optimizer[pl]
       self.optimizers.similarity_optimizer[pl].state = state["optimizers"].similarity_optimizer[pl]
       self.optimizers.ps_decoder_optimizer[pl].state = state["optimizers"].ps_decoder_optimizer[pl]
+      self.optimizers.legal_actions_optimizer[pl].state = state["optimizers"].legal_actions_optimizer[pl]
     
      
 
