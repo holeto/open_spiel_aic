@@ -324,13 +324,11 @@ class MuZeroGameplay:
       
       depth_history_next_history = convert_depth_to_jax(depth_history_next_history),
     )
-    cfr = MuZeroCFR(constants)
-    
-    return cfr
+    self.cfr = MuZeroCFR(constants) 
     
 
-  def run_cfr(self, cfr):
-    cfr.multiple_steps(self.config.resolve_iterations)
+  def run_cfr(self):
+    self.cfr.multiple_steps(self.config.resolve_iterations)
 
   def get_policy(self, iset):
     if self.cfr is None:
@@ -340,11 +338,12 @@ class MuZeroGameplay:
   def get_action(self, public_state, iset):
     
     abstracted_iset = self.muzero.get_abstraction(public_state, iset, self.config.player)
-    optional_policy = self.get_policy(iset)
+    optional_policy = self.get_policy(abstracted_iset)
     if optional_policy is not None:
       return np.random.choice(self.actions, p=optional_policy)
+    
     construct_gadget = not self.new_game
-    # construct_gadget = True
+    
     if self.new_game:
       self.new_game = False
       isets = self.build_initial_root(public_state, iset)
@@ -353,16 +352,13 @@ class MuZeroGameplay:
     else:
       isets, reaches, cf_values= self.find_root_from_previous(public_state, iset)
       
-    # TODO: Refactor this.
-    cfr = self.prepare_cfr_structure(isets, reaches, cf_values, construct_gadget)
-    self.run_cfr(cfr)
-    policy = cfr.get_strategy(abstracted_iset, self.config.player)
+      
+    self.prepare_cfr_structure(isets, reaches, cf_values, construct_gadget)
+    self.run_cfr()
     
-    self.cfr = cfr
-    policy = np.asarray(policy, dtype="float64")
-    policy /= np.sum(policy)
-    #just in case
-    self.policy[jnp.array_str(iset)] = policy
+    policy = self.get_policy(abstracted_iset)
+     
+    
     return np.random.choice(self.actions, p=policy)
   
   
