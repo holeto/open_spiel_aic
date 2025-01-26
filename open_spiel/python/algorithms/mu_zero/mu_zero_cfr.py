@@ -185,7 +185,7 @@ class MuZeroCFR:
         regrets[d][1] = jnp.maximum(regrets[d][1] - p2_bin_regrets, 0.0)
         
         cf_value = history_value[..., None] * jnp.expand_dims(history_reaches[d][1], -1) 
-        bin_cf_value = jnp.bincount(self.constants.depth_history_iset[d][0].ravel(), cf_value.ravel(), length=self.constants.depth_iset_legal[d][0].shape[0]).reshape(cf_values[d][0].shape)
+        bin_cf_value = jnp.bincount(self.constants.depth_history_iset[d][1].ravel(), cf_value.ravel(), length=self.constants.depth_iset_legal[d][1].shape[0]).reshape(cf_values[d][1].shape)
         cf_values[d][1] = cf_values[d][1] +  (bin_cf_value - cf_values[d][1]) * (2/(iteration + 1))
       
       

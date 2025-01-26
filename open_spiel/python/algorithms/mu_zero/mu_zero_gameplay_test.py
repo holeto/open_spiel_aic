@@ -69,7 +69,8 @@ def loaded_test(cards):
 
 def main():
   cards = 3
-  goofspiel_test(cards)
+  # goofspiel_test(cards)
+  loaded_test(cards)
   
 
 if __name__ == "__main__":

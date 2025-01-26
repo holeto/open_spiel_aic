@@ -53,12 +53,10 @@ class MuZeroGameplay:
   def reset(self):
     self.new_game = True 
     
-  # TODO: pass the state?
-  # TODO: Do we need this method? Maybe we could just do this in initilize_isets
   # TODO: Shouldn't we just p1_iset and p2_iset in a single array?
-  # THIS IS THE ONLY PART WHERE WE USE OPPONENT'S INFOSET! It is because at the beginning of the game both players know the state exactly. We cannot use this knowledge anywhere else
   def build_initial_root(self, public_state, iset):
     assert np.allclose(iset, self.init_info[self.config.player])
+    assert np.allclose(public_state, self.init_info[2])
     return self.init_iset
    
 
@@ -350,7 +348,6 @@ class MuZeroGameplay:
     if self.new_game:
       self.new_game = False
       isets = self.build_initial_root(public_state, iset)
-      
       reaches = np.ones((2, isets.shape[1]))
       cf_values = np.zeros((isets.shape[1],))
     else:
