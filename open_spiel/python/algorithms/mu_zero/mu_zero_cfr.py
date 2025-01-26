@@ -95,7 +95,7 @@ class MuZeroCFR:
     
   def find_reaches_from_average(self):
     averages = [[self.averages[d][pl] / jnp.sum(self.averages[d][pl], axis=-1, keepdims=True) for pl in range(self.players)] for d in range(self.constants.max_depth)]
-    return self.propagate_reaches(averages)
+    return self.find_reaches(averages)
     
   # TODO: Could this be connected to jit_step?
   def find_reaches(self, strategies):
@@ -121,6 +121,7 @@ class MuZeroCFR:
     
     
   # Is it okay to compile for each player separately?
+  # TODO: Could we remove some bin counts?
   @functools.partial(jax.jit, static_argnums=(0, 5))
   def jit_step(self, regrets, averages, cf_values, average_policy_update_coefficient, player, iteration):
     
@@ -175,6 +176,10 @@ class MuZeroCFR:
         
         cf_value = history_value[..., None] * jnp.expand_dims(history_reaches[d][1], -1) 
         bin_cf_value = jnp.bincount(self.constants.depth_history_iset[d][0].ravel(), cf_value.ravel(), length=self.constants.depth_iset_legal[d][0].shape[0]).reshape(cf_values[d][0].shape)
+        
+        bin_reaches = jnp.bincount(self.constants.depth_history_iset[d][0].ravel(), history_reaches[d][1].ravel(), length=self.constants.depth_iset_legal[d][0].shape[0]).reshape(cf_values[d][0].shape)
+        
+        bin_cf_value = jnp.where(bin_reaches > 1e-8, bin_cf_value / bin_reaches, bin_cf_value) 
         cf_values[d][0] = cf_values[d][0] + (bin_cf_value - cf_values[d][0]) * (2 / (iteration + 1))
         
         regrets[d][0] = jnp.maximum(regrets[d][0] + p1_bin_regrets, 0.0)
@@ -184,8 +189,14 @@ class MuZeroCFR:
         p2_bin_regrets = jnp.bincount(self.constants.depth_history_actions[d][1].ravel(), p2_cf_regret.ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][1].shape[0]).reshape(regrets[d][1].shape) * self.constants.depth_iset_legal[d][1]
         regrets[d][1] = jnp.maximum(regrets[d][1] - p2_bin_regrets, 0.0)
         
-        cf_value = history_value[..., None] * jnp.expand_dims(history_reaches[d][1], -1) 
+        cf_value = history_value[..., None] * jnp.expand_dims(history_reaches[d][0], -1) 
+        
         bin_cf_value = jnp.bincount(self.constants.depth_history_iset[d][1].ravel(), cf_value.ravel(), length=self.constants.depth_iset_legal[d][1].shape[0]).reshape(cf_values[d][1].shape)
+        
+        bin_reaches = jnp.bincount(self.constants.depth_history_iset[d][1].ravel(), history_reaches[d][0].ravel(), length=self.constants.depth_iset_legal[d][1].shape[0]).reshape(cf_values[d][1].shape)
+        
+        bin_cf_value = jnp.where(bin_reaches > 1e-10, bin_cf_value / bin_reaches, bin_cf_value)
+        
         cf_values[d][1] = cf_values[d][1] +  (bin_cf_value - cf_values[d][1]) * (2/(iteration + 1))
       
       
