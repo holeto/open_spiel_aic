@@ -32,22 +32,23 @@ class MuZeroGameplay:
     self.muzero = muzero
     self.actions = muzero.actions
     self.mvs_actions = self.muzero.config.transformations + 1
- 
-
     self.new_game = True # flag that specifies whether we are at the beginning of the game or whether we have moved
+    self.initialize_isets() 
     
-    self.init_isets = self.initialize_isets()
-    self.prev_solver = None
+    self.cfr = None
     self.policy = {}
     
+  # First finds the information states and public states from the game, then pushes them through abstraction layer
   def initialize_isets(self):
     if isinstance(self.muzero.game, JaxOriginalGoofspiel):
       init_info = self.muzero.game.initialize_structures()[:-1] # Last thing is a legal actions
-      _, p1_iset, p2_iset, _ = self.muzero.game.get_info(*init_info)
-      return p1_iset, p2_iset
+      _, *self.init_info = self.muzero.game.get_info(*init_info) 
     else:
       state = self.muzero.game.new_initial_state()
-      return np.array(state.information_state_tensor(0)), np.array(state.information_state_tensor(1))
+      self.init_info =  np.array(state.information_state_tensor(0)), np.array(state.information_state_tensor(1)), np.array(state.public_state_tensor())
+    p1_iset, p2_iset = self.muzero.get_both_abstraction(self.init_info[2], self.init_info[0], self.init_info[1])
+    self.init_iset = np.stack((p1_iset[None, ...], p2_iset[None, ...]), 0) # Shape would be [Pl, 1, Iset]
+    
     
   def reset(self):
     self.new_game = True 
@@ -57,28 +58,27 @@ class MuZeroGameplay:
   # TODO: Shouldn't we just p1_iset and p2_iset in a single array?
   # THIS IS THE ONLY PART WHERE WE USE OPPONENT'S INFOSET! It is because at the beginning of the game both players know the state exactly. We cannot use this knowledge anywhere else
   def build_initial_root(self, public_state, iset):
-    assert np.allclose(iset, self.init_isets[self.config.player])
-    p1_iset, p2_iset = self.muzero.get_both_abstraction(public_state, *self.init_isets)
-    return np.stack((p1_iset[None, ...], p2_iset[None, ...]), 0) # Shape would be [Pl, 1, Iset]
-  
+    assert np.allclose(iset, self.init_info[self.config.player])
+    return self.init_iset
+   
 
   def find_root_from_previous(self, public_state, iset):
   # We are passing public state and infoset separately, but from iset you should be able to get public state ideally.
     #interested in the reaches for the resolving player in the last layer
-    last_layer_CF_vals = self.prev_solver.get_last_depth_player_cf_values(self.config.player)
+    last_layer_CF_vals = self.cfr.get_last_depth_player_cf_values(self.config.player)
     #abstracted_iset = self.muzero.get_abstraction(public_state, iset, self.config.player)
     #TODO: Propagate the current reaches in CFR
     # and return per history reaches
-    reaches = self.prev_solver.find_reaches_from_average()
+    reaches = self.cfr.find_reaches_from_average()
     #interested in the reaches for the resolving player in the last layer
     #[S(D)]
     last_layer_reaches = reaches[-1, self.config.player, :]
     #[Pl,H(D)]
-    last_layer_iset_indices = jnp.stack([self.prev_solver.constants.depth_history_iset[-1][pl] for pl in range(2)], axis=0)
+    last_layer_iset_indices = jnp.stack([self.cfr.constants.depth_history_iset[-1][pl] for pl in range(2)], axis=0)
     #Assuming equal number of isets for both player
     num_isets = last_layer_iset_indices[self.config.player].shape[0]
     #[Pl,H(D)]
-    last_layer_isets = jnp.stack([self.prev_solver.constants.depth_iset_map[-1][pl][last_layer_iset_indices[pl]] for pl in range(2)], axis=0)
+    last_layer_isets = jnp.stack([self.cfr.constants.depth_iset_map[-1][pl][last_layer_iset_indices[pl]] for pl in range(2)], axis=0)
     #The version using public state decoder
     vectorized_decoder = jax.vmap(self.muzero.get_decoded_public_state, in_axes=(0, None), out_axes=0)
     vectorized_compare = jax.vmap(jax.vmap(check_iset_similarity, in_axes=(0, None), out_axes=0), in_axes=(0, None), out_axes=0)
@@ -333,15 +333,12 @@ class MuZeroGameplay:
 
   def run_cfr(self, cfr):
     cfr.multiple_steps(self.config.resolve_iterations)
-     
-   
-  # Returns either policy or None. latter is that the policy is not computed yet.
+
   def get_policy(self, iset):
-    iset_str = jnp.array_str(iset)
-    if iset_str not in self.policy:
+    if self.cfr is None:
       return None
-    return self.policy[iset_str]
-    
+    return self.cfr.get_strategy(iset, self.config.player)
+
   def get_action(self, public_state, iset):
     
     abstracted_iset = self.muzero.get_abstraction(public_state, iset, self.config.player)
@@ -363,7 +360,8 @@ class MuZeroGameplay:
     cfr = self.prepare_cfr_structure(isets, reaches, cf_values, construct_gadget)
     self.run_cfr(cfr)
     policy = cfr.get_strategy(abstracted_iset, self.config.player)
-    self.prev_solver = cfr
+    
+    self.cfr = cfr
     policy = np.asarray(policy, dtype="float64")
     policy /= np.sum(policy)
     #just in case

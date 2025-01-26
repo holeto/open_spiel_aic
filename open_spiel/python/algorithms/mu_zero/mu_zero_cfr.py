@@ -82,12 +82,13 @@ class MuZeroCFR:
     self.timestep += 1
   
   # TODO: It would be better to exactly know which depth you are searching and compute the similarity for each iset in that depth and select the one with minimal difference. This would avoid possibility of  not finding correct iset.
-  def get_strategy(self, iset, player):
-    for d in range(self.constants.max_depth):
+  def get_strategy(self, iset, player, depth = -1):
+    used_range = (depth, depth+1) if depth >= 0 else (0, self.constants.max_depth)
+    for d in range(*used_range):
       for i in range(self.constants.depth_iset_map[d][player].shape[0]):
         if check_iset_similarity(iset, self.constants.depth_iset_map[d][player][i]):
           return self.averages[d][player][i] / jnp.sum(self.averages[d][player][i])
-    assert False, "No strategy found for iset"
+    return None
 
   def get_last_depth_player_cf_values(self, player):
     return self.cf_values[-1][player][self.constants.depth_history_iset[-1][player]]

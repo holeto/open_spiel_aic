@@ -5,7 +5,7 @@ from open_spiel.python.algorithms.mu_zero.mu_zero_gameplay import MuZeroGameplay
 from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
 import numpy as np
 import jax.numpy as jnp
-
+import pickle
 
 def goofspiel_test(cards: int = 3, steps: int = 3, player=0):
   
@@ -44,6 +44,27 @@ def goofspiel_test(cards: int = 3, steps: int = 3, player=0):
     turn += 1
     _, p1_iset, p2_iset, ps = game.get_info(*info)
 
+
+def loaded_test(cards):
+  # cards = 3
+  folder = "muzero_networks/goofspiel_" + str(cards) + "/"
+  file_name = "cfr_abstraction_39.pkl"
+  with open(folder + file_name, "rb") as f:
+    muzero = pickle.load(f)
+    
+  gp_config = MuZeroGameplayConfig(player=0, depth_limit=2)
+  muzero_gp = MuZeroGameplay(muzero, gp_config)
+  
+  
+  init_info = muzero.game.initialize_structures()
+  
+  _, p1_iset, p2_iset, ps = muzero.game.get_info(*init_info[:-1])
+  
+  a1 = muzero_gp.get_action(ps, p1_iset)
+  
+  
+    
+  
   
 
 def main():
