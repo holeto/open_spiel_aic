@@ -36,6 +36,7 @@ class MuZeroGameplay:
     self.initialize_isets() 
     
     self.cfr = None
+    self.tree_depth = 0
     self.policy = {}
     
   # First finds the information states and public states from the game, then pushes them through abstraction layer
@@ -65,16 +66,14 @@ class MuZeroGameplay:
     #interested in the reaches for the resolving player in the last layer
     last_layer_CF_vals = self.cfr.get_last_depth_player_cf_values(self.config.player)
     #abstracted_iset = self.muzero.get_abstraction(public_state, iset, self.config.player)
-    #TODO: Propagate the current reaches in CFR
-    # and return per history reaches
     reaches = self.cfr.find_reaches_from_average()
     #interested in the reaches for the resolving player in the last layer
-    #[S(D)]
-    last_layer_reaches = reaches[-1, self.config.player, :]
+    #[H(D)]
+    last_layer_reaches = reaches[-1][self.config.player]
     #[Pl,H(D)]
     last_layer_iset_indices = jnp.stack([self.cfr.constants.depth_history_iset[-1][pl] for pl in range(2)], axis=0)
     #Assuming equal number of isets for both player
-    num_isets = last_layer_iset_indices[self.config.player].shape[0]
+    #num_isets = last_layer_iset_indices[self.config.player].shape[0]
     #[Pl,H(D)]
     last_layer_isets = jnp.stack([self.cfr.constants.depth_iset_map[-1][pl][last_layer_iset_indices[pl]] for pl in range(2)], axis=0)
     #The version using public state decoder
@@ -92,7 +91,6 @@ class MuZeroGameplay:
     stacked_nodes = jnp.stack([last_layer_isets[0][found_node_indices], last_layer_isets[1][found_node_indices]], axis = 0)
     #TODO: Returning it like this assumes that the reaches have shape H(D)
     # and returns reaches per history. Would that be a problem?
-    #TODO: Add CF values to the CFR and return them
     return stacked_nodes[:, None, :], last_layer_reaches[found_node_indices], last_layer_CF_vals[found_node_indices]
     #This is a version without using the public state decoder
     #TODO: Naive version
@@ -330,16 +328,21 @@ class MuZeroGameplay:
   def run_cfr(self):
     self.cfr.multiple_steps(self.config.resolve_iterations)
 
-  def get_policy(self, iset):
+  def get_policy(self, iset, depth=-1):
     if self.cfr is None:
       return None
-    return self.cfr.get_strategy(iset, self.config.player)
+    return self.cfr.get_strategy(iset, self.config.player, depth)
 
   def get_action(self, public_state, iset):
     
     abstracted_iset = self.muzero.get_abstraction(public_state, iset, self.config.player)
-    optional_policy = self.get_policy(abstracted_iset)
+    self.tree_depth += 1
+    optional_policy = self.get_policy(abstracted_iset, self.tree_depth)
     if optional_policy is not None:
+      #This is temporary to prevent bug of numpy
+      # claiming that the pbts do not sum up to 1
+      optional_policy = np.asarray(policy, optional_policy="float64")
+      optional_policy /= np.sum(optional_policy)
       return np.random.choice(self.actions, p=optional_policy)
     
     construct_gadget = not self.new_game
@@ -352,11 +355,15 @@ class MuZeroGameplay:
     else:
       isets, reaches, cf_values= self.find_root_from_previous(public_state, iset)
       
-      
+    self.tree_depth = 0  
     self.prepare_cfr_structure(isets, reaches, cf_values, construct_gadget)
     self.run_cfr()
     
-    policy = self.get_policy(abstracted_iset)
+    policy = self.get_policy(abstracted_iset, self.tree_depth)
+    #This is temporary to prevent bug of numpy
+    # claiming that the pbts do not sum up to 1
+    policy = np.asarray(policy, dtype="float64")
+    policy /= np.sum(policy)
      
     
     return np.random.choice(self.actions, p=policy)
