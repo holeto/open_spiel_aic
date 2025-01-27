@@ -33,6 +33,7 @@ class MuZeroGameplay:
     self.actions = muzero.actions
     self.mvs_actions = self.muzero.config.transformations + 1
     self.new_game = True # flag that specifies whether we are at the beginning of the game or whether we have moved
+    self.constructed_gadget = False
     self.initialize_isets() 
     
     self.cfr = None
@@ -53,15 +54,27 @@ class MuZeroGameplay:
     
   def reset(self):
     self.new_game = True 
-    
-  # TODO: Shouldn't we just p1_iset and p2_iset in a single array?
+     
   def build_initial_root(self, public_state, iset):
-    assert np.allclose(iset, self.init_info[self.config.player])
+    assert np.allclose(iset, self.init_iset[self.config.player])
     assert np.allclose(public_state, self.init_info[2])
     return self.init_iset
    
+   
+  def find_next_root(self, public_state, iset):
+    opponent = 1 - self.config.player
+    public_state_histories = self.cfr.find_public_state_from_iset(iset, self.config.player, self.tree_depth)
+    history_reaches = self.cfr.find_reaches_from_average()[self.tree_depth][:, public_state_histories]
+    # TODO: Use numpy or jax.numpy?
+    next_reaches = jnp.where(jnp.array([[self.config.player == 0], [self.config.player == 1]]), history_reaches, 1.0) 
+    next_isets_id = self.cfr.constants.depth_history_iset[self.tree_depth][:, public_state_histories]
+    next_cf_values = self.cfr.cf_values[self.tree_depth][opponent][next_isets_id[opponent]]
+    next_isets = self.cfr.constants.depth_iset_map[self.tree_depth][opponent][next_isets_id[opponent]]
+    next_isets = jnp.stack([self.cfr.constants.depth_iset_map[self.tree_depth][pl][next_isets_id[pl]] for pl in range(2)], axis = 0)
+    return next_isets, next_reaches, next_cf_values 
 
   def find_root_from_previous(self, public_state, iset):
+    
   # We are passing public state and infoset separately, but from iset you should be able to get public state ideally.
     #interested in the reaches for the resolving player in the last layer
     last_layer_CF_vals = self.cfr.get_last_depth_player_cf_values(self.config.player)
@@ -159,8 +172,7 @@ class MuZeroGameplay:
     depth_history_actions = []
     depth_history_legal = []
     
-    depth_history_next_history = []
-    # TODO: Do the same thing as with histories? Since we know that each player plays at each turn. 
+    depth_history_next_history = [] 
     
     # TODO: Split the map to be separate for each depth.
     # Because of imperfect recall it does not make sense to have all the isets in the same map.
@@ -327,10 +339,15 @@ class MuZeroGameplay:
   def run_cfr(self):
     self.cfr.multiple_steps(self.config.resolve_iterations)
 
-  def get_policy(self, iset, depth=-1):
-    if self.cfr is None:
+  def get_policy(self, iset):
+    depth_limit = self.config.depth_limit + self.constructed_gadget
+    if self.cfr is None or self.tree_depth >= depth_limit:
       return None
-    return self.cfr.get_strategy(iset, self.config.player, depth)
+    policy = self.cfr.get_strategy(iset, self.config.player, self.tree_depth)
+    policy = np.asarray(policy, dtype="float64")
+    policy /= np.sum(policy)
+    
+    return policy
 
   def get_action(self, public_state, iset):
     #TODO: Except first step, no policy for iset is found
@@ -339,33 +356,29 @@ class MuZeroGameplay:
     self.tree_depth += 1
     optional_policy = self.get_policy(abstracted_iset)
     if optional_policy is not None:
-      #This is temporary to prevent bug of numpy
-      # claiming that the pbts do not sum up to 1
-      optional_policy = np.asarray(policy, optional_policy="float64")
-      optional_policy /= np.sum(optional_policy)
-      #print("Already computed policy: ", optional_policy)
+      
       return np.random.choice(self.actions, p=optional_policy)
     
     construct_gadget = not self.new_game
-    
     if self.new_game:
-      self.new_game = False
-      isets = self.build_initial_root(public_state, iset)
+      isets = self.build_initial_root(public_state, abstracted_iset)
       reaches = np.ones((2,isets.shape[1]))
       cf_values = np.zeros((isets.shape[1],))
-    else:
-      isets, reaches, cf_values= self.find_root_from_previous(public_state, iset)
       
-    self.tree_depth = 0  
+      self.new_game = False
+      self.constructed_gadget = False
+      self.tree_depth = 0
+      
+    else:
+      isets, reaches, cf_values = self.find_next_root(public_state, abstracted_iset)
+      # With gadget the depth is one further, because of the opponents decision node.
+      self.constructed_gadget = True
+      self.tree_depth = 1
+      
     self.prepare_cfr_structure(isets, reaches, cf_values, construct_gadget)
     self.run_cfr()
     
     policy = self.get_policy(abstracted_iset)
-    #print(policy)
-    #This is temporary to prevent bug of numpy
-    # claiming that the pbts do not sum up to 1
-    policy = np.asarray(policy, dtype="float64")
-    policy /= np.sum(policy)
     
     return np.random.choice(self.actions, p=policy)
   

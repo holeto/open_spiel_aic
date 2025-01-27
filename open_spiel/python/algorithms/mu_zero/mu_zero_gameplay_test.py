@@ -77,23 +77,30 @@ def goofspiel_test(args):
     _, p1_iset, p2_iset, ps = muzero.game.get_info(*info)
 
 
-# def loaded_test(args):
-#   # cards = 3
-#   #folder = "muzero_networks/goofspiel_" + str(args.cards) + "/"
-#   file_name = "cfr_abstraction_39.pkl"
-#   with open(args.solver_save_folder + file_name, "rb") as f:
-#     muzero = pickle.load(f)
+def loaded_test(cards):
+  # cards = 3
+  folder = "muzero_networks/goofspiel_" + str(cards) + "/"
+  file_name = "cfr_abstraction_39.pkl"
+  with open(folder + file_name, "rb") as f:
+    muzero = pickle.load(f)
     
-#   gp_config = MuZeroGameplayConfig(player=0, depth_limit=2)
-#   muzero_gp = MuZeroGameplay(muzero, gp_config)
+  player = 0
+  opponent = 1 - player
+  gp_config = MuZeroGameplayConfig(player=player, depth_limit=1)
+  muzero_gp = MuZeroGameplay(muzero, gp_config)
   
+  init_info = muzero.game.initialize_structures()
   
-#   init_info = muzero.game.initialize_structures()
+  _, p1_iset, p2_iset, ps = muzero.game.get_info(*init_info[:-1])
   
-#   _, p1_iset, p2_iset, ps = muzero.game.get_info(*init_info[:-1])
+  a1 = muzero_gp.get_action(ps, p1_iset) 
   
-#   a1 = muzero_gp.get_action(ps, p1_iset)
+  a2 = np.random.choice(init_info[-1][opponent])
   
+  legals, rewards, point_cards, played_cards, p1_points = muzero.game.apply_action(*init_info[:-1], 0, jnp.array([a1, a2]))
+  info = (point_cards, played_cards, p1_points)
+  _, p1_iset, p2_iset, ps = muzero.game.get_info(*info)
+  a1 = muzero_gp.get_action(ps, p1_iset) 
   
     
   
@@ -102,8 +109,8 @@ def goofspiel_test(args):
 def main():
   cards = 3
   args = parser.parse_args()
-  goofspiel_test(args)
-  #loaded_test(cards)
+  # goofspiel_test(args)
+  loaded_test(cards)
   
 
 if __name__ == "__main__":

@@ -3,11 +3,16 @@ import chex
 import jax
 import jax.numpy as jnp
 import functools
+import numpy as np
 
 from open_spiel.python.jax.cfr.jax_cfr import JAX_CFR_SIMULTANEOUS_UPDATE, regret_matching
 
+
 def check_iset_similarity(iset1, iset2, threshold=0.1):
-  return jnp.mean(jnp.abs(iset1 - iset2)) < threshold
+  # return jnp.mean(jnp.abs(iset1 - iset2)) < threshold
+  similarity = np.linalg.norm(iset1 - iset2, ord=2) / np.sqrt(iset1.shape[-1])
+  return similarity < threshold
+
 
 @chex.dataclass(frozen=True)
 class MuZeroCFRConstants:
@@ -81,14 +86,48 @@ class MuZeroCFR:
 
     self.timestep += 1
   
-  # TODO: It would be better to exactly know which depth you are searching and compute the similarity for each iset in that depth and select the one with minimal difference. This would avoid possibility of  not finding correct iset.
-  def get_strategy(self, iset, player, depth = -1):
-    used_range = (depth, depth+1) if depth >= 0 else (0, self.constants.max_depth)
-    for d in range(*used_range):
-      for i in range(self.constants.depth_iset_map[d][player].shape[0]):
-        if check_iset_similarity(iset, self.constants.depth_iset_map[d][player][i]):
-          return self.averages[d][player][i] / jnp.sum(self.averages[d][player][i])
-    return None
+
+  def get_strategy(self, iset, player, depth):
+    iset_id = self.find_most_likely_index(iset, player, depth)
+    
+    iset_strategy = self.averages[depth][player][iset_id]
+    normalization = jnp.sum(iset_strategy)
+    
+    return jnp.where(normalization > 1e-10, iset_strategy / normalization, 1 / self.averages[depth][player].shape[-1])
+  
+  def find_public_state_from_iset(self, iset, player, depth):
+    init_infoset = self.find_most_likely_index(iset, player, depth)
+    visited_isets = [set(), set()]
+    visited_histories = set()
+    curr_player = player
+    # TODO: Use sets?
+    curr_isets = np.array([init_infoset])
+    visited_isets[player].add(init_infoset)
+    while curr_isets.size > 0:
+      matching_iset = self.constants.depth_history_iset[depth][curr_player, ..., None] == curr_isets[None, ...]
+      histories = np.nonzero(np.sum(matching_iset, -1))
+      curr_player = 1 -curr_player
+      next_isets = []
+      for history in histories[0]:
+        visited_histories.add(int(history))
+        history_iset = int(self.constants.depth_history_iset[depth][curr_player][history])
+        if history_iset not in visited_isets[curr_player]:
+          next_isets.append(history_iset)
+          visited_isets[curr_player].add(history_iset)
+      curr_isets = np.array(next_isets)
+      
+    return np.fromiter(visited_histories, int)#, np.fromiter(visited_isets[0], int), np.fromiter(visited_isets[1], int)
+    
+  
+  def find_most_likely_index(self, iset, player, depth):
+    closeness = np.linalg.norm(iset - self.constants.depth_iset_map[depth][player], axis=-1)
+    return np.argmin(closeness)
+  
+  def find_iset_index(self, iset, player, depth):
+    for i in range(self.constants.depth_iset_map[depth][player].shape[0]):
+      if check_iset_similarity(iset, self.constants.depth_iset_map[depth][player][i]):
+        return i
+    return -1
 
   def get_last_depth_player_cf_values(self, player):
     return self.cf_values[-1][player][self.constants.depth_history_iset[-1][player]]
@@ -97,7 +136,7 @@ class MuZeroCFR:
     averages = [[self.averages[d][pl] / jnp.sum(self.averages[d][pl], axis=-1, keepdims=True) for pl in range(self.players)] for d in range(self.constants.max_depth)]
     return self.find_reaches(averages)
     
-  # TODO: Could this be connected to jit_step?
+  # TODO: Could this be used in jit_step?
   def find_reaches(self, strategies):
   
     history_reaches = [self.constants.init_reaches]
@@ -106,7 +145,7 @@ class MuZeroCFR:
     
     for d in range(self.constants.max_depth - 1):
       strategy_realization = history_reaches[d][..., None] * history_strategies[d]
-       
+
       
       p1_masked_realization = strategy_realization[0, ..., None] * (self.constants.depth_history_next_history[d] >= 0)
       
@@ -183,11 +222,11 @@ class MuZeroCFR:
         cf_values[d][0] = cf_values[d][0] + (bin_cf_value - cf_values[d][0]) * (2 / (iteration + 1))
         
         regrets[d][0] = jnp.maximum(regrets[d][0] + p1_bin_regrets, 0.0)
+        
       if player != 0:
         p2_value = jnp.sum(action_value * history_strategies[d][0,..., None], axis=-2)
         p2_cf_regret = (p2_value - history_value[..., None]) * jnp.expand_dims(history_reaches[d][0], -1)
         p2_bin_regrets = jnp.bincount(self.constants.depth_history_actions[d][1].ravel(), p2_cf_regret.ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][1].shape[0]).reshape(regrets[d][1].shape) * self.constants.depth_iset_legal[d][1]
-        regrets[d][1] = jnp.maximum(regrets[d][1] - p2_bin_regrets, 0.0)
         
         cf_value = history_value[..., None] * jnp.expand_dims(history_reaches[d][0], -1) 
         
@@ -195,9 +234,10 @@ class MuZeroCFR:
         
         bin_reaches = jnp.bincount(self.constants.depth_history_iset[d][1].ravel(), history_reaches[d][0].ravel(), length=self.constants.depth_iset_legal[d][1].shape[0]).reshape(cf_values[d][1].shape)
         
-        bin_cf_value = jnp.where(bin_reaches > 1e-10, bin_cf_value / bin_reaches, bin_cf_value)
-        
+        bin_cf_value = jnp.where(bin_reaches > 1e-8, bin_cf_value / bin_reaches, bin_cf_value)        
         cf_values[d][1] = cf_values[d][1] +  (bin_cf_value - cf_values[d][1]) * (2/(iteration + 1))
+        
+        regrets[d][1] = jnp.maximum(regrets[d][1] - p2_bin_regrets, 0.0)
       
       
       # history_value = jnp.sum(action_value *)
