@@ -48,7 +48,7 @@ class MuZeroGameplay:
       state = self.muzero.game.new_initial_state()
       self.init_info =  np.array(state.information_state_tensor(0)), np.array(state.information_state_tensor(1)), np.array(state.public_state_tensor())
     p1_iset, p2_iset = self.muzero.get_both_abstraction(self.init_info[2], self.init_info[0], self.init_info[1])
-    self.init_iset = np.stack((p1_iset[None, ...], p2_iset[None, ...]), 0) # Shape would be [Pl, 1, Iset]
+    self.init_iset = np.stack((p1_iset[None, ...], p2_iset[None, ...]), 0) # Shape would be [Pl, H(D), 32]
     
     
   def reset(self):
@@ -69,7 +69,7 @@ class MuZeroGameplay:
     reaches = self.cfr.find_reaches_from_average()
     #interested in the reaches for the resolving player in the last layer
     #[H(D)]
-    last_layer_reaches = reaches[-1][self.config.player]
+    last_layer_reaches = reaches[-1]
     #[Pl,H(D)]
     last_layer_iset_indices = jnp.stack([self.cfr.constants.depth_history_iset[-1][pl] for pl in range(2)], axis=0)
     #Assuming equal number of isets for both player
@@ -87,11 +87,10 @@ class MuZeroGameplay:
     pub_state_mask_pl = vectorized_compare(last_layer_pub_states, public_state)
     #[H(D)]
     pub_state_mask = jnp.logical_and(pub_state_mask_pl[0], pub_state_mask_pl[1]).flatten()
-    found_node_indices = pub_state_mask.nonzero()
+    found_node_indices = pub_state_mask.nonzero()[0]
     stacked_nodes = jnp.stack([last_layer_isets[0][found_node_indices], last_layer_isets[1][found_node_indices]], axis = 0)
-    #TODO: Returning it like this assumes that the reaches have shape H(D)
-    # and returns reaches per history. Would that be a problem?
-    return stacked_nodes[:, None, :], last_layer_reaches[found_node_indices], last_layer_CF_vals[found_node_indices]
+    #Have to return reaches for both players
+    return stacked_nodes, last_layer_reaches[:, found_node_indices], last_layer_CF_vals[found_node_indices]
     #This is a version without using the public state decoder
     #TODO: Naive version
     # pub_state = []
@@ -227,7 +226,7 @@ class MuZeroGameplay:
       
       # TODO: Can this be done better so we do not have to copy the actions for each player, but so that we can just use it as it is.
       
-      p2_actions = np.tile(np.arange(self.actions), (curr_iset.shape[1], self.actions, 1)) 
+      p2_actions = np.tile(np.arange(self.actions), (curr_iset.shape[1], self.actions, 1))
       p1_actions = np.transpose(p2_actions, (0, 2, 1))
       next_p1_isets, next_p2_isets, next_utilities, next_terminal = vectorized_abstraction(curr_iset[0], curr_iset[1], p1_actions, p2_actions) 
       
@@ -334,15 +333,17 @@ class MuZeroGameplay:
     return self.cfr.get_strategy(iset, self.config.player, depth)
 
   def get_action(self, public_state, iset):
+    #TODO: Except first step, no policy for iset is found
     
     abstracted_iset = self.muzero.get_abstraction(public_state, iset, self.config.player)
     self.tree_depth += 1
-    optional_policy = self.get_policy(abstracted_iset, self.tree_depth)
+    optional_policy = self.get_policy(abstracted_iset)
     if optional_policy is not None:
       #This is temporary to prevent bug of numpy
       # claiming that the pbts do not sum up to 1
       optional_policy = np.asarray(policy, optional_policy="float64")
       optional_policy /= np.sum(optional_policy)
+      #print("Already computed policy: ", optional_policy)
       return np.random.choice(self.actions, p=optional_policy)
     
     construct_gadget = not self.new_game
@@ -350,7 +351,7 @@ class MuZeroGameplay:
     if self.new_game:
       self.new_game = False
       isets = self.build_initial_root(public_state, iset)
-      reaches = np.ones((2, isets.shape[1]))
+      reaches = np.ones((2,isets.shape[1]))
       cf_values = np.zeros((isets.shape[1],))
     else:
       isets, reaches, cf_values= self.find_root_from_previous(public_state, iset)
@@ -359,12 +360,12 @@ class MuZeroGameplay:
     self.prepare_cfr_structure(isets, reaches, cf_values, construct_gadget)
     self.run_cfr()
     
-    policy = self.get_policy(abstracted_iset, self.tree_depth)
+    policy = self.get_policy(abstracted_iset)
+    #print(policy)
     #This is temporary to prevent bug of numpy
     # claiming that the pbts do not sum up to 1
     policy = np.asarray(policy, dtype="float64")
     policy /= np.sum(policy)
-     
     
     return np.random.choice(self.actions, p=policy)
   
