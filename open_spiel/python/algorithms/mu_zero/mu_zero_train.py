@@ -635,9 +635,13 @@ class MuZeroTrain():
   
   # The observaiton is already only for a given player pl
   def get_abstraction(self, public_state, obs, pl):
+    if not self.config.use_abstraction:
+      return obs
     return self._jit_get_abstraction(self.network_parameters.abstraction_params[pl], self.network_parameters.iset_encoder_params[pl], public_state, obs) 
   
   def get_both_abstraction(self, public_state, p1_iset, p2_iset):
+    if not self.config.use_abstraction:
+      return p1_iset, p2_iset
     p1_abstraction_iset = self._jit_get_abstraction(self.network_parameters.abstraction_params[0], self.network_parameters.iset_encoder_params[0], public_state, p1_iset)
     p2_abstraction_iset = self._jit_get_abstraction(self.network_parameters.abstraction_params[1], self.network_parameters.iset_encoder_params[1], public_state, p2_iset)
     return p1_abstraction_iset, p2_abstraction_iset

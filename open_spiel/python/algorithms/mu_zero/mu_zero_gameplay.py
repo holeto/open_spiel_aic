@@ -42,7 +42,7 @@ def find_next_root(cfr: MuZeroCFR, tree_depth: int, player: int, public_state, i
 
 # Starts in a single public state and creates a DL-tree.
 # Each layer should be done at once. Any call to NN should be done once!
-def prepare_cfr_structure(muzero: MuZeroTrain, player: int, isets, reaches, cf_values, construct_gadget):
+def prepare_cfr_structure(muzero: MuZeroTrain, player: int, depth_limit, isets, reaches, cf_values, construct_gadget):
   chex.assert_equal(isets.shape[:-1], reaches.shape)
   chex.assert_equal(isets.shape[1:-1], cf_values.shape)
   mvs_actions = muzero.config.transformations + 1
@@ -103,7 +103,7 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, isets, reaches, cf_v
   
   
   def handle_single_layer(curr_iset, depth):
-    iset_map, isets, actions = create_iset_map(curr_iset, actions)
+    iset_map, isets, actions = create_iset_map(curr_iset, muzero.actions)
     # TODO: Could this be jitted from here onward?
     # What spedup would that bring? Would require to change some indexing to jnp.where 
     p1_legal_iset, p2_legal_iset = muzero.get_both_legal_actions_from_abstraction(iset_map[0], iset_map[1])
@@ -122,7 +122,7 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, isets, reaches, cf_v
     
     # TODO: Can this be done better so we do not have to copy the actions for each player, but so that we can just use it as it is.
     
-    p2_actions = np.tile(np.arange(actions), (curr_iset.shape[1], actions, 1))
+    p2_actions = np.tile(np.arange(muzero.actions), (curr_iset.shape[1], muzero.actions, 1))
     p1_actions = np.transpose(p2_actions, (0, 2, 1))
     next_p1_isets, next_p2_isets, next_utilities, next_terminal = vectorized_abstraction(curr_iset[0], curr_iset[1], p1_actions, p2_actions) 
     
@@ -154,7 +154,7 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, isets, reaches, cf_v
     if np.all(next_history < 0):
       return
     
-    if depth + 1 == config.depth_limit:
+    if depth + 1 == depth_limit:
       handle_mvs_layer(next_isets)
     else:
       handle_single_layer(next_isets, depth+1)
@@ -299,7 +299,7 @@ class MuZeroGameplay:
   # Starts in a single public state and creates a DL-tree.
   # Each layer should be done at once. Any call to NN should be done once!
   def prepare_cfr_structure(self, isets, reaches, cf_values, construct_gadget):
-    self.cfr = prepare_cfr_structure(self.muzero, self.config.player, isets, reaches, cf_values, construct_gadget)
+    self.cfr = prepare_cfr_structure(self.muzero, self.config.player, self.config.depth_limit, isets, reaches, cf_values, construct_gadget)
 
   def run_cfr(self):
     self.cfr.multiple_steps(self.config.resolve_iterations)
