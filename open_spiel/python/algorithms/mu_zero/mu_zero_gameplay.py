@@ -8,7 +8,7 @@ import numpy as np
 import queue
 
 from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
-from open_spiel.python.algorithms.mu_zero.mu_zero import MuZeroTrain
+from open_spiel.python.algorithms.mu_zero.mu_zero_train import MuZeroTrain
 from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFRConstants, MuZeroCFR, check_iset_similarity
 
 @chex.dataclass(frozen=True)

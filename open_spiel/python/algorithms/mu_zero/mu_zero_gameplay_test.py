@@ -1,5 +1,5 @@
 
-from open_spiel.python.algorithms.mu_zero.mu_zero import MuZeroTrain, MuZeroTrainConfig
+from open_spiel.python.algorithms.mu_zero.mu_zero_train import MuZeroTrain, MuZeroTrainConfig
 from open_spiel.python.algorithms.mu_zero.mu_zero_gameplay import MuZeroGameplay, MuZeroGameplayConfig
 
 from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
