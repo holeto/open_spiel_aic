@@ -24,6 +24,204 @@ def convert_player_depth_to_jax(arr):
 def convert_depth_to_jax(arr):
   return [jnp.array(d) for d in arr]
 
+def validate_terminal(terminal, threshold: float = 0.5):
+  return terminal < threshold
+
+def find_next_root(cfr: MuZeroCFR, tree_depth: int, player: int, public_state, iset):
+  opponent = 1 - player
+  public_state_histories = cfr.find_public_state_from_iset(iset, player, tree_depth)
+  history_reaches = cfr.find_reaches_from_average()[tree_depth][:, public_state_histories]
+  # TODO: Use numpy or jax.numpy?
+  next_reaches = jnp.where(jnp.array([[player == 0], [player == 1]]), history_reaches, 1.0) 
+  next_isets_id = cfr.constants.depth_history_iset[tree_depth][:, public_state_histories]
+  next_cf_values = cfr.cf_values[tree_depth][opponent][next_isets_id[opponent]]
+  next_isets = cfr.constants.depth_iset_map[tree_depth][opponent][next_isets_id[opponent]]
+  next_isets = jnp.stack([cfr.constants.depth_iset_map[tree_depth][pl][next_isets_id[pl]] for pl in range(2)], axis = 0)
+  return next_isets, next_reaches, next_cf_values 
+
+
+# Starts in a single public state and creates a DL-tree.
+# Each layer should be done at once. Any call to NN should be done once!
+def prepare_cfr_structure(muzero: MuZeroTrain, player: int, isets, reaches, cf_values, construct_gadget):
+  chex.assert_equal(isets.shape[:-1], reaches.shape)
+  chex.assert_equal(isets.shape[1:-1], cf_values.shape)
+  mvs_actions = muzero.config.transformations + 1
+  actions = muzero.actions
+  
+  depth_iset_map = [] # We create initial dummy iset 0
+  depth_iset_legal = []
+  
+  depth_history_action_utility = []
+  depth_history_iset = []
+  depth_history_actions = []
+  depth_history_legal = []
+  
+  depth_history_next_history = [] 
+  
+  # TODO: Split the map to be separate for each depth.
+  # Because of imperfect recall it does not make sense to have all the isets in the same map.
+  def create_iset_map(curr_iset, amount_actions):
+    isets = [[], []]
+    iset_map = [[], []]
+    for pl in range(curr_iset.shape[0]):
+      first_iset_id = len(iset_map[pl])
+      for i in range(curr_iset.shape[1]): 
+        curr_index = -1
+        for j in range(first_iset_id, len(iset_map[pl])):
+          if check_iset_similarity(iset_map[pl][j], curr_iset[pl, i]):
+            curr_index = j
+            break
+        if curr_index < 0:
+          curr_index = len(iset_map[pl])
+          iset_map[pl].append(curr_iset[pl, i])  
+        isets[pl].append(curr_index)
+        
+    isets = np.array(isets)
+    actions = isets[..., None] * amount_actions + np.arange(amount_actions)[None, None, ...] 
+    iset_map = [np.array(i) for i in iset_map]
+    return iset_map, isets, actions
+  
+  
+  def handle_mvs_layer(curr_iset):
+    iset_map, isets, actions = create_iset_map(curr_iset, mvs_actions)
+    
+    mvs_vals = muzero.get_mvs_from_abstraction(curr_iset[0], curr_iset[1])
+    iset_legal = [np.ones(iset_map[pl].shape[:-1] + (mvs_actions,)) for pl in range(2)] 
+    legal = np.ones_like(mvs_vals)
+    next_history = np.full_like(mvs_vals, -1, dtype=int)
+    
+    depth_iset_map.append(iset_map)
+    depth_iset_legal.append(iset_legal)
+    
+    depth_history_action_utility.append(mvs_vals)
+    depth_history_iset.append(isets)
+    depth_history_actions.append(actions) 
+    depth_history_legal.append(legal) 
+    depth_history_next_history.append(next_history)
+    
+    
+  
+  
+  def handle_single_layer(curr_iset, depth):
+    iset_map, isets, actions = create_iset_map(curr_iset, actions)
+    # TODO: Could this be jitted from here onward?
+    # What spedup would that bring? Would require to change some indexing to jnp.where 
+    p1_legal_iset, p2_legal_iset = muzero.get_both_legal_actions_from_abstraction(iset_map[0], iset_map[1])
+    p1_legal_iset, p2_legal_iset = p1_legal_iset > 0, p2_legal_iset > 0
+    
+    p1_legal, p2_legal = p1_legal_iset[isets[0]], p2_legal_iset[isets[1]] 
+    iset_legal = [p1_legal_iset, p2_legal_iset]
+    legal = p1_legal[..., None] * p2_legal[..., None, :]
+    # If we ever change to Bool[D, H(D),Pl, A], Instead of [D, H(D),A1, A2]
+    # legal_stacked = np.stack((p1_legal, p2_legal), 0)
+    
+    
+    # Even with in dimension -1, we want output dimension to be before the last dimension.
+    # Checked that this does what is supposed (which is np.transpose(res, (0, 2, 3, 1)))
+    vectorized_abstraction = jax.vmap(jax.vmap(muzero.get_next_state_from_abstraction, in_axes=(None, None, -1, -1), out_axes=(-2, -2, -2, -2)), in_axes=(None, None, -1, -1), out_axes=(-2, -2, -2, -2))
+    
+    # TODO: Can this be done better so we do not have to copy the actions for each player, but so that we can just use it as it is.
+    
+    p2_actions = np.tile(np.arange(actions), (curr_iset.shape[1], actions, 1))
+    p1_actions = np.transpose(p2_actions, (0, 2, 1))
+    next_p1_isets, next_p2_isets, next_utilities, next_terminal = vectorized_abstraction(curr_iset[0], curr_iset[1], p1_actions, p2_actions) 
+    
+    action_utility = legal * next_utilities[..., 0] # We will select only utilities of player 0. We can do some more fancy stuff here, but whatever.
+    # action_utility = legal * (next_utilities[..., 0] - next_utilities[..., 1]) / 2
+    
+    
+    non_terminal = np.squeeze(validate_terminal(next_terminal), -1) * legal
+    # next_flattened_p1_isets = np.choose()
+    
+    
+    # From [H(D), A1, A2] should select [H(D + 1)] 
+    # nonzero() returns indices which are non zero in tuple (4-tuple in this case)
+    nonzeros = non_terminal.nonzero()
+    next_isets = np.stack((next_p1_isets, next_p2_isets), 0)
+    next_isets = next_isets[:, *nonzeros, :] 
+    
+    # This should be -1 everywhere, except the part where you have next history. Therey ou go by terminal and just add 1
+    next_history = (np.cumsum(non_terminal).reshape(non_terminal.shape) * non_terminal) - 1
+    
+    depth_iset_map.append(iset_map)
+    depth_iset_legal.append(iset_legal)
+    depth_history_action_utility.append(action_utility)
+    depth_history_iset.append(isets)
+    depth_history_actions.append(actions)
+    depth_history_legal.append(legal)  
+    depth_history_next_history.append(next_history.astype(int))
+    
+    if np.all(next_history < 0):
+      return
+    
+    if depth + 1 == config.depth_limit:
+      handle_mvs_layer(next_isets)
+    else:
+      handle_single_layer(next_isets, depth+1)
+    
+    
+  def handle_gadget_layer(curr_iset, cf_values):
+      
+    iset_map, isets, actions = create_iset_map(curr_iset, 2) # Different amount of actions, only 2 for each player
+    # TODO: Can these be done better?
+    
+    action_utilities = np.zeros((cf_values.shape[0], 2, 2))
+    # Resolving player plays the only legal action, while the other terminates the game
+    action_utilities[:, 0, 0] = cf_values #
+    iset_legal = [np.ones(iset_map[pl].shape[:-1] + (2,)) for pl in range(2)] 
+    iset_legal[player][:, 1] = 0
+    legals = np.ones((cf_values.shape[0], 2, 2))
+    next_history = np.full((cf_values.shape[0], 2, 2), -1, dtype = int)
+    if player == 0:
+      legals[:, 1, :] = 0
+      
+      next_history[:, 0, 1] = np.arange(cf_values.shape[0])
+    else:
+      legals[:, :, 1] = 0 
+      next_history[:, 1, 0] = np.arange(cf_values.shape[0])
+    
+    depth_iset_map.append(iset_map)
+    depth_iset_legal.append(iset_legal)
+    depth_history_iset.append(isets)
+    depth_history_actions.append(actions)
+    depth_history_action_utility.append(action_utilities)
+    depth_history_legal.append(legals)
+    depth_history_next_history.append(next_history)
+    
+    handle_single_layer(curr_iset, 0)   
+      
+  
+  if construct_gadget:
+    handle_gadget_layer(isets, cf_values)
+  else:
+    handle_single_layer(isets, 0)
+
+  init_reaches = jnp.copy(reaches)
+  init_condition = jnp.array([player == 0, player == 1])
+  init_reaches = jnp.where(init_condition[..., None], init_reaches, 1) 
+  
+  constants = MuZeroCFRConstants(
+    max_depth = len(depth_history_iset),
+    resolving_player = player,
+    
+    init_reaches = init_reaches,
+    
+    depth_actions = [a.shape[-1] for a in depth_history_actions],
+    depth_iset_map = convert_player_depth_to_jax(depth_iset_map),
+    depth_iset_legal = convert_player_depth_to_jax(depth_iset_legal),
+    
+    depth_history_action_utility = convert_depth_to_jax(depth_history_action_utility),
+    depth_history_iset = convert_depth_to_jax(depth_history_iset),
+    depth_history_actions = convert_depth_to_jax(depth_history_actions),
+    depth_history_legal = convert_depth_to_jax(depth_history_legal),
+    
+    depth_history_next_history = convert_depth_to_jax(depth_history_next_history),
+  )
+  
+  return MuZeroCFR(constants) 
+    
+
+
 # The main idea is:
 # Create root
 class MuZeroGameplay:
@@ -62,16 +260,7 @@ class MuZeroGameplay:
    
    
   def find_next_root(self, public_state, iset):
-    opponent = 1 - self.config.player
-    public_state_histories = self.cfr.find_public_state_from_iset(iset, self.config.player, self.tree_depth)
-    history_reaches = self.cfr.find_reaches_from_average()[self.tree_depth][:, public_state_histories]
-    # TODO: Use numpy or jax.numpy?
-    next_reaches = jnp.where(jnp.array([[self.config.player == 0], [self.config.player == 1]]), history_reaches, 1.0) 
-    next_isets_id = self.cfr.constants.depth_history_iset[self.tree_depth][:, public_state_histories]
-    next_cf_values = self.cfr.cf_values[self.tree_depth][opponent][next_isets_id[opponent]]
-    next_isets = self.cfr.constants.depth_iset_map[self.tree_depth][opponent][next_isets_id[opponent]]
-    next_isets = jnp.stack([self.cfr.constants.depth_iset_map[self.tree_depth][pl][next_isets_id[pl]] for pl in range(2)], axis = 0)
-    return next_isets, next_reaches, next_cf_values 
+    find_next_root(self.cfr, self.tree_depth, self.config.player, public_state, iset)
 
   def find_root_from_previous(self, public_state, iset):
     
@@ -105,236 +294,12 @@ class MuZeroGameplay:
     #Have to return reaches for both players
     return stacked_nodes, last_layer_reaches[:, found_node_indices], last_layer_CF_vals[found_node_indices]
     #This is a version without using the public state decoder
-    #TODO: Naive version
-    # pub_state = []
-    #Find idx of the initial iset
-    # start_iset_idx = 0
-    # for i in range(num_isets):
-    #     pl_iset = last_layer_isets[self.config.player][i]
-    #     if check_iset_similarity(pl_iset, iset):
-    #       start_iset_idx = last_layer_iset_indices[self.config.player][i]
-    #       #start_iset_idx = i
-    #       break
-    # visited = [[], []]
-    # q = queue()
-    # def check_visited(new_iset_idx, player):
-    #   for iset_idx in visited[player]:
-    #     if iset_idx == new_iset_idx:
-    #       return True
-    #   return False
-    # def add_by_iset(iset_to_add, player):
-    #   for i in range(num_isets):
-    #     pl_iset = last_layer_isets[player][i]
-    #     if check_iset_similarity(pl_iset, iset_to_add):
-    #       opp_iset = last_layer_isets[1 - player][i]
-    #       state = []
-    #       if player == 0:
-    #         state.append(pl_iset)
-    #         state.append(opp_iset)
-    #       else:
-    #         state.append(opp_iset)
-    #         state.append(pl_iset)
-    #       opp_iset_idx = last_layer_iset_indices[1 - player][i]
-    #       q.enqueue((opp_iset_idx, opp_iset, 1 - player))
-    #       public_state.append(state)
-    #   return q
-    # q = add_by_iset(iset, self.config.player)
-    # visited[self.config.player].append(start_iset_idx)
-    # while not q.empty():
-    #   opp_iset_idx, opp_iset, player = q.dequeue()
-    #   if not check_visited(opp_iset_idx, player):
-    #     add_by_iset(opp_iset, 0)
-    #     visited[player].append(iset)
-      
-    #TODO: Pick only last layer reaches which are for isets in public state
-    #TODO: Return also CF values from the CFR
-    #return pub_state, last_layer_reaches[visited[self.config.player]]
-
-  
-  
-  # def check_pub_state_intersection(self, iset, public_state):
-  #   return False
    
-  def validate_terminal(self, terminal, threshold: float = 0.5):
-    return terminal < threshold
   
   # Starts in a single public state and creates a DL-tree.
   # Each layer should be done at once. Any call to NN should be done once!
   def prepare_cfr_structure(self, isets, reaches, cf_values, construct_gadget):
-    chex.assert_equal(isets.shape[:-1], reaches.shape)
-    chex.assert_equal(isets.shape[1:-1], cf_values.shape)
-   
-    depth_iset_map = [] # We create initial dummy iset 0
-    depth_iset_legal = []
-    
-    depth_history_action_utility = []
-    depth_history_iset = []
-    depth_history_actions = []
-    depth_history_legal = []
-    
-    depth_history_next_history = [] 
-    
-    # TODO: Split the map to be separate for each depth.
-    # Because of imperfect recall it does not make sense to have all the isets in the same map.
-    def create_iset_map(curr_iset, amount_actions):
-      isets = [[], []]
-      iset_map = [[], []]
-      for pl in range(curr_iset.shape[0]):
-        first_iset_id = len(iset_map[pl])
-        for i in range(curr_iset.shape[1]): 
-          curr_index = -1
-          for j in range(first_iset_id, len(iset_map[pl])):
-            if check_iset_similarity(iset_map[pl][j], curr_iset[pl, i]):
-              curr_index = j
-              break
-          if curr_index < 0:
-            curr_index = len(iset_map[pl])
-            iset_map[pl].append(curr_iset[pl, i])  
-          isets[pl].append(curr_index)
-          
-      isets = np.array(isets)
-      actions = isets[..., None] * amount_actions + np.arange(amount_actions)[None, None, ...] 
-      iset_map = [np.array(i) for i in iset_map]
-      return iset_map, isets, actions
-    
-    
-    def handle_mvs_layer(curr_iset):
-      iset_map, isets, actions = create_iset_map(curr_iset, self.mvs_actions)
-      
-      mvs_vals = self.muzero.get_mvs_from_abstraction(curr_iset[0], curr_iset[1])
-      iset_legal = [np.ones(iset_map[pl].shape[:-1] + (self.mvs_actions,)) for pl in range(2)] 
-      legal = np.ones_like(mvs_vals)
-      next_history = np.full_like(mvs_vals, -1, dtype=int)
-      
-      depth_iset_map.append(iset_map)
-      depth_iset_legal.append(iset_legal)
-      
-      depth_history_action_utility.append(mvs_vals)
-      depth_history_iset.append(isets)
-      depth_history_actions.append(actions) 
-      depth_history_legal.append(legal) 
-      depth_history_next_history.append(next_history)
-      
-      
-    
-    
-    def handle_single_layer(curr_iset, depth):
-      iset_map, isets, actions = create_iset_map(curr_iset, self.actions)
-      # TODO: Could this be jitted from here onward?
-      # What spedup would that bring? Would require to change some indexing to jnp.where 
-      p1_legal_iset, p2_legal_iset = self.muzero.get_both_legal_actions_from_abstraction(iset_map[0], iset_map[1])
-      p1_legal_iset, p2_legal_iset = p1_legal_iset > 0, p2_legal_iset > 0
-      
-      p1_legal, p2_legal = p1_legal_iset[isets[0]], p2_legal_iset[isets[1]] 
-      iset_legal = [p1_legal_iset, p2_legal_iset]
-      legal = p1_legal[..., None] * p2_legal[..., None, :]
-      # If we ever change to Bool[D, H(D),Pl, A], Instead of [D, H(D),A1, A2]
-      # legal_stacked = np.stack((p1_legal, p2_legal), 0)
-      
-      
-      # Even with in dimension -1, we want output dimension to be before the last dimension.
-      # Checked that this does what is supposed (which is np.transpose(res, (0, 2, 3, 1)))
-      vectorized_abstraction = jax.vmap(jax.vmap(self.muzero.get_next_state_from_abstraction, in_axes=(None, None, -1, -1), out_axes=(-2, -2, -2, -2)), in_axes=(None, None, -1, -1), out_axes=(-2, -2, -2, -2))
-      
-      # TODO: Can this be done better so we do not have to copy the actions for each player, but so that we can just use it as it is.
-      
-      p2_actions = np.tile(np.arange(self.actions), (curr_iset.shape[1], self.actions, 1))
-      p1_actions = np.transpose(p2_actions, (0, 2, 1))
-      next_p1_isets, next_p2_isets, next_utilities, next_terminal = vectorized_abstraction(curr_iset[0], curr_iset[1], p1_actions, p2_actions) 
-      
-      action_utility = legal * next_utilities[..., 0] # We will select only utilities of player 0. We can do some more fancy stuff here, but whatever.
-      # action_utility = legal * (next_utilities[..., 0] - next_utilities[..., 1]) / 2
-      
-      
-      non_terminal = np.squeeze(self.validate_terminal(next_terminal), -1) * legal
-      # next_flattened_p1_isets = np.choose()
-      
-      
-      # From [H(D), A1, A2] should select [H(D + 1)] 
-      # nonzero() returns indices which are non zero in tuple (4-tuple in this case)
-      nonzeros = non_terminal.nonzero()
-      next_isets = np.stack((next_p1_isets, next_p2_isets), 0)
-      next_isets = next_isets[:, *nonzeros, :] 
-      
-      # This should be -1 everywhere, except the part where you have next history. Therey ou go by terminal and just add 1
-      next_history = (np.cumsum(non_terminal).reshape(non_terminal.shape) * non_terminal) - 1
-      
-      depth_iset_map.append(iset_map)
-      depth_iset_legal.append(iset_legal)
-      depth_history_action_utility.append(action_utility)
-      depth_history_iset.append(isets)
-      depth_history_actions.append(actions)
-      depth_history_legal.append(legal)  
-      depth_history_next_history.append(next_history.astype(int))
-      
-      if np.all(next_history < 0):
-        return
-      
-      if depth + 1 == self.config.depth_limit:
-        handle_mvs_layer(next_isets)
-      else:
-        handle_single_layer(next_isets, depth+1)
-      
-      
-    def handle_gadget_layer(curr_iset, cf_values):
-       
-      iset_map, isets, actions = create_iset_map(curr_iset, 2) # Different amount of actions, only 2 for each player
-      # TODO: Can these be done better?
-      
-      action_utilities = np.zeros((cf_values.shape[0], 2, 2))
-      # Resolving player plays the only legal action, while the other terminates the game
-      action_utilities[:, 0, 0] = cf_values #
-      iset_legal = [np.ones(iset_map[pl].shape[:-1] + (2,)) for pl in range(2)] 
-      iset_legal[self.config.player][:, 1] = 0
-      legals = np.ones((cf_values.shape[0], 2, 2))
-      next_history = np.full((cf_values.shape[0], 2, 2), -1, dtype = int)
-      if self.config.player == 0:
-        legals[:, 1, :] = 0
-        
-        next_history[:, 0, 1] = np.arange(cf_values.shape[0])
-      else:
-        legals[:, :, 1] = 0 
-        next_history[:, 1, 0] = np.arange(cf_values.shape[0])
-      
-      depth_iset_map.append(iset_map)
-      depth_iset_legal.append(iset_legal)
-      depth_history_iset.append(isets)
-      depth_history_actions.append(actions)
-      depth_history_action_utility.append(action_utilities)
-      depth_history_legal.append(legals)
-      depth_history_next_history.append(next_history)
-      
-      handle_single_layer(curr_iset, 0)   
-       
-    
-    if construct_gadget:
-      handle_gadget_layer(isets, cf_values)
-    else:
-      handle_single_layer(isets, 0)
-
-    init_reaches = jnp.copy(reaches)
-    init_condition = jnp.array([self.config.player == 0, self.config.player == 1])
-    init_reaches = jnp.where(init_condition[..., None], init_reaches, 1) 
-    
-    constants = MuZeroCFRConstants(
-      max_depth = len(depth_history_iset),
-      resolving_player = self.config.player,
-      
-      init_reaches = init_reaches,
-      
-      depth_actions = [a.shape[-1] for a in depth_history_actions],
-      depth_iset_map = convert_player_depth_to_jax(depth_iset_map),
-      depth_iset_legal = convert_player_depth_to_jax(depth_iset_legal),
-      
-      depth_history_action_utility = convert_depth_to_jax(depth_history_action_utility),
-      depth_history_iset = convert_depth_to_jax(depth_history_iset),
-      depth_history_actions = convert_depth_to_jax(depth_history_actions),
-      depth_history_legal = convert_depth_to_jax(depth_history_legal),
-      
-      depth_history_next_history = convert_depth_to_jax(depth_history_next_history),
-    )
-    self.cfr = MuZeroCFR(constants) 
-    
+    self.cfr = prepare_cfr_structure(self.muzero, self.config.player, isets, reaches, cf_values, construct_gadget)
 
   def run_cfr(self):
     self.cfr.multiple_steps(self.config.resolve_iterations)
