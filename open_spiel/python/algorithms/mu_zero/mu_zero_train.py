@@ -137,7 +137,7 @@ class PublicStateEncoder(nn.Module):
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
     ps = nn.Dense(self.iset_size * self.isets)(x)
-    ps = jnp.squeeze(ps.reshape((-1, self.isets, self.iset_size)))
+    ps = ps.reshape(*ps.shape[:-1], self.isets, self.iset_size)
     return ps
 
 class PublicStateDecoder(nn.Module):
@@ -180,7 +180,7 @@ class TransformationNetwork(nn.Module):
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
     x = nn.Dense(self.transformations * self.actions)(x)
-    x = jnp.squeeze(x.reshape((-1, self.transformations, self.actions)))
+    x = x.reshape(*x.shape[:-1], self.transformations, self.actions)
     return x
 
 class MAVSNetwork(nn.Module):
@@ -195,7 +195,7 @@ class MAVSNetwork(nn.Module):
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
     x = nn.Dense(self.values * self.values)(x)
-    x = jnp.squeeze(x.reshape((-1, self.values, self.values)))
+    x = x.reshape(*x.shape[:-1], self.values, self.values)
     return x 
   
 class MUVSNetwork(nn.Module):
@@ -211,7 +211,7 @@ class MUVSNetwork(nn.Module):
     x = nn.Dense(self.hidden_size)(x)
     x = nn.relu(x)
     x = nn.Dense(self.values + self.values)(x)
-    x = jnp.squeeze(x.reshape((-1, 2, self.values)))
+    x = x.reshape(*x.shape[:-1], 2, self.values)
     return x
  
 class ExpectedNetwork(nn.Module):
