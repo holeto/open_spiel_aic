@@ -170,7 +170,6 @@ class JaxGoofspiel():
     
     return point_cards, played_cards, p1_points, turn
   
-from pyinstrument import Profiler
 
 def main():
   cards = 5

@@ -8,7 +8,6 @@ from open_spiel.python.policy import TabularPolicy
 from open_spiel.python.algorithms.exploitability import exploitability
 
 from typing import Sequence, Any, Callable
-from pyinstrument import Profiler
 import jax
 import jax.numpy as jnp
 import jax.lax as lax

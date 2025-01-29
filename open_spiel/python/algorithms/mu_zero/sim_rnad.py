@@ -7,7 +7,6 @@ from open_spiel.python.policy import TabularPolicy
 from open_spiel.python.algorithms.exploitability import exploitability
 
 from typing import Sequence, Any
-from pyinstrument import Profiler
 import jax
 import jax.numpy as jnp
 import jax.lax as lax
@@ -76,7 +75,7 @@ class RNaDNework(nn.Module):
 @chex.dataclass(frozen=True)
 class MuZeroConfig: 
   
-  batch_size: int = 32
+  batch_size: int = 64
   
   trajectory_max: int = 6
   
@@ -88,7 +87,7 @@ class MuZeroConfig:
   rnad_hidden_size: int = 256
   
   entropy_schedule_repeats: Sequence[int] = (1,)
-  entropy_schedule_size: Sequence[int] = (2000,)
+  entropy_schedule_size: Sequence[int] = (1000,)
   
   learning_rate = 3e-4
   target_network_update = 1e-3
@@ -698,7 +697,7 @@ def main():
   
   # profiler = Profiler()
   # profiler.start()
-  for _ in range(100000):
+  for _ in range(50000):
     muzero.goofspiel_step()
      
   
