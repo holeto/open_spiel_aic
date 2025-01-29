@@ -23,66 +23,65 @@ parser.add_argument("--verbose", type=bool, default=False, help="Print played ac
 
 
 #Extracts full policy as dictionary for an RNaD opponent
-def extract_rnad_policy(model:MuZeroTrain, game:JaxOriginalGoofspiel, player):
-  policy = {}
-  visited_isets = {}
-  isets = []
-  iset_legals = []
-  def _extract_goofspiel_isets(states, depth: int = 0):
-    for state in states:
-      _, p1_iset, p2_iset, public_state = game.get_info(*state[:-1])
-      iset = p2_iset if player == 0 else p1_iset
-      iset_str = stringify(iset)
-      opp_legals = state[-1][1 - player]
-      if iset_str not in visited_isets:
-        iset_idx = len(isets)
-        visited_isets[iset_str] = iset_idx
-        isets.append(iset)
-        iset_legals.append(opp_legals)
+# def extract_rnad_policy(model:MuZeroTrain, game:JaxOriginalGoofspiel, player):
+#   policy = {}
+#   visited_isets = {}
+#   isets = []
+#   iset_legals = []
+#   def _extract_goofspiel_isets(states, depth: int = 0):
+#     for state in states:
+#       _, p1_iset, p2_iset, public_state = game.get_info(*state[:-1])
+#       iset = p2_iset if player == 0 else p1_iset
+#       iset_str = stringify(iset)
+#       opp_legals = state[-1][1 - player]
+#       if iset_str not in visited_isets:
+#         iset_idx = len(isets)
+#         visited_isets[iset_str] = iset_idx
+#         isets.append(iset)
+#         iset_legals.append(opp_legals)
 
-    if depth + 2 >= game.cards:
-      return
-    next_states = []
-    for state in states:
-      for a1i, a1 in enumerate(state[-1][0]):
-        if a1 < 0.5:
-          continue
-        for a2i, a2 in enumerate(state[-1][1]):
-          if a2 < 0.5:
-            continue
-          new_legals, new_rewards, new_point_cards, new_played_cards, new_p1_points = game.apply_action(*state[:-1], depth, np.array([a1i, a2i])) 
-          new_info = (new_point_cards, new_played_cards, new_p1_points, new_legals)
-          next_states.append(new_info)
-    _extract_goofspiel_isets(next_states, depth + 1)
-  init_info = game.initialize_structures()
-  _extract_goofspiel_isets([init_info])
-  isets = np.array(isets)
-  iset_legals = np.array(iset_legals)
-  pi = model._jit_get_policy(model.network_parameters.rnad_params_target, isets, iset_legals)
-  for iset, pols in zip(isets, pi):
-    normalized_pols = np.asarray(pols, dtype="float64")
-    normalized_pols /= np.sum(normalized_pols)
-    policy[stringify(iset)] = normalized_pols
-  return policy
+#     if depth + 2 >= game.cards:
+#       return
+#     next_states = []
+#     for state in states:
+#       for a1i, a1 in enumerate(state[-1][0]):
+#         if a1 < 0.5:
+#           continue
+#         for a2i, a2 in enumerate(state[-1][1]):
+#           if a2 < 0.5:
+#             continue
+#           new_legals, new_rewards, new_point_cards, new_played_cards, new_p1_points = game.apply_action(*state[:-1], depth, np.array([a1i, a2i])) 
+#           new_info = (new_point_cards, new_played_cards, new_p1_points, new_legals)
+#           next_states.append(new_info)
+#     _extract_goofspiel_isets(next_states, depth + 1)
+#   init_info = game.initialize_structures()
+#   _extract_goofspiel_isets([init_info])
+#   isets = np.array(isets)
+#   iset_legals = np.array(iset_legals)
+#   pi = model._jit_get_policy(model.network_parameters.rnad_params_target, isets, iset_legals)
+#   for iset, pols in zip(isets, pi):
+#     normalized_pols = np.asarray(pols, dtype="float64")
+#     normalized_pols /= np.sum(normalized_pols)
+#     policy[stringify(iset)] = normalized_pols
+#   return policy
 
 
 
-def get_opponent_action(opponent:str, opp_iset, opp_legals, actions, opp_policy):
+def get_opponent_action(opponent:str, opp_iset, opp_legals, actions, model:MuZeroTrain):
   #TODO: Add different opponents here
   pi = None
   if opponent == "rnad":
-    #TODO: An alternative would be to call the network
-    # for each opponent, iset
-    # pi = model._jit_get_policy(model.network_parameters.rnad_params_target, opp_iset, opp_legals)
-    # rather than computing the whole policy beforehand
-    pi = opp_policy[stringify(opp_iset)]
+    pi = model._jit_get_policy(model.network_parameters.rnad_params_target, opp_iset, opp_legals)
+    pi = np.asarray(pi, dtype="float64")
+    pi /= np.sum(pi)
+    #pi = opp_policy[stringify(opp_iset)]
   #random opponent
   else:
     pi = np.ones_like(actions) * opp_legals
     pi /= np.sum(pi)
   return np.random.choice(actions, p=pi)
 
-def play_single_round(args, muzero_gameplay: MuZeroGameplay, game: JaxOriginalGoofspiel, opp_policy):
+def play_single_round(args, muzero_gameplay: MuZeroGameplay, game: JaxOriginalGoofspiel, model:MuZeroTrain):
   init_info = game.initialize_structures()
   opp = 1 - args.player
   opp_legals = init_info[-1][opp]
@@ -98,7 +97,7 @@ def play_single_round(args, muzero_gameplay: MuZeroGameplay, game: JaxOriginalGo
     pl_iset = p1_iset if args.player == 0 else p2_iset
     opp_iset = p2_iset if args.player == 0 else p1_iset
     pl_action = muzero_gameplay.get_action(ps, pl_iset)
-    opp_action = get_opponent_action(args.opponent, opp_iset, opp_legals, all_actions, opp_policy)
+    opp_action = get_opponent_action(args.opponent, opp_iset, opp_legals, all_actions, model)
     actions = [[],[]]
     actions[args.player] = pl_action
     actions[opp] = opp_action
@@ -122,9 +121,9 @@ def main():
   assert model.game.points_order == "descending", "We cannot handle exploitability of different Goofspiels"
   gp_config =MuZeroGameplayConfig(player=args.player)
   muzero_gameplay = MuZeroGameplay(model, gp_config)
-  opp_policy = extract_rnad_policy(model, model.game, args.player) if args.opponent == "rnad" else None
+  #opp_policy = extract_rnad_policy(model, model.game, args.player) if args.opponent == "rnad" else None
   for _ in range(args.rounds):
-    play_single_round(args, muzero_gameplay, model.game, opp_policy)
+    play_single_round(args, muzero_gameplay, model.game, model)
     muzero_gameplay.reset()
   
 
