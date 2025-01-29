@@ -13,6 +13,7 @@ __pycache__/
 .venv
 venv/
 ENV/
+VENV_DIR/
 
  # OSX specific
 .DS_Store
@@ -51,6 +52,7 @@ Manifest.toml
 .idea/
 .vscode/
 *~
+tmp/*
 
 
 open_spiel/cmake-build-debug/
@@ -60,3 +62,10 @@ Package.resolved
 # Visual Studio generated files
 open_spiel/.vs
 /.env
+diffusion_models*
+sepot_networks*
+*.pkl
+*.png
+*.pdf
+
+networks*
