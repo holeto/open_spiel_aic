@@ -1,12 +1,15 @@
 import argparse
 import jax.numpy as jnp
 import numpy as np
+import time
+from joblib import Parallel, delayed
+from copy import copy
 
 from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
 from open_spiel.python.algorithms.mu_zero.experiments.utils import load_model
 from open_spiel.python.algorithms.mu_zero.mu_zero import MuZeroTrain
 from open_spiel.python.algorithms.mu_zero.mu_zero_gameplay import MuZeroGameplay, MuZeroGameplayConfig
-from goofspiel_exploitability import stringify
+#from goofspiel_exploitability import stringify
 
 parser = argparse.ArgumentParser()
 
@@ -81,22 +84,24 @@ def get_opponent_action(opponent:str, opp_iset, opp_legals, actions, model:MuZer
     pi /= np.sum(pi)
   return np.random.choice(actions, p=pi)
 
-def play_single_round(args, muzero_gameplay: MuZeroGameplay, game: JaxOriginalGoofspiel, model:MuZeroTrain):
-  init_info = game.initialize_structures()
+def play_single_round(args, model:MuZeroTrain, gameplay: MuZeroGameplay, parallel:bool = True):
+  init_info = model.game.initialize_structures()
   opp = 1 - args.player
   opp_legals = init_info[-1][opp]
   
-  _, p1_iset, p2_iset, ps = game.get_info(*init_info[:-1])
+  _, p1_iset, p2_iset, ps = model.game.get_info(*init_info[:-1])
   info = init_info[:-1]
   turn = 0
   cumulative_reward = 0
-  all_actions = np.arange(game.cards)
+  all_actions = np.arange(model.game.cards)
+  temp_gameplay = copy(gameplay) if parallel else gameplay
+  #temp_gameplay = copy(gameplay)
   
   #play until terminal
-  for _ in range(game.cards - 1):
+  for _ in range(model.game.cards - 1):
     pl_iset = p1_iset if args.player == 0 else p2_iset
     opp_iset = p2_iset if args.player == 0 else p1_iset
-    pl_action = muzero_gameplay.get_action(ps, pl_iset)
+    pl_action = temp_gameplay.get_action(ps, pl_iset)
     opp_action = get_opponent_action(args.opponent, opp_iset, opp_legals, all_actions, model)
     actions = [[],[]]
     actions[args.player] = pl_action
@@ -104,15 +109,40 @@ def play_single_round(args, muzero_gameplay: MuZeroGameplay, game: JaxOriginalGo
     if args.verbose:
       print("Applying action: ", actions)
     actions = jnp.stack(actions, axis=0)
-    legals, rewards, point_cards, played_cards, p1_points = game.apply_action(*info, turn, actions)
+    legals, rewards, point_cards, played_cards, p1_points = model.game.apply_action(*info, turn, actions)
     cumulative_reward += rewards
     info = (point_cards, played_cards, p1_points)
     opp_legals = legals[opp]
     turn += 1
-    _, p1_iset, p2_iset, ps = game.get_info(*info)
-  print("P1 reward: ", cumulative_reward)
-  print("P2 reward: ", -cumulative_reward)
+    _, p1_iset, p2_iset, ps = model.game.get_info(*info)
+  temp_gameplay.reset()
+  if args.verbose:
+    print("P1 reward: ", cumulative_reward)
+    print("P2 reward: ", -cumulative_reward)
+  return cumulative_reward
 
+
+def sequential_experiment(args, model, muzero_gameplay):
+  start_time = time.time()
+  mean_reward = 0
+  for _ in range(args.rounds):
+    mean_reward += play_single_round(args, model, muzero_gameplay, parallel=False)
+  mean_reward /= args.rounds
+  print("Execution time: ", time.time() - start_time)
+  print("P1 mean reward: ", mean_reward)
+  print("P2 mean reward: ", -mean_reward)
+
+def parallel_experiment(args, model, muzero_gameplay, njobs=8):
+  assert False, "Do not call this function yet. It does not work!"
+  if args.verbose:
+    print("Warning! Parallel experiment was called with verbose prints.These are not thread safe.")
+  start_time = time.time()
+  cumulative_rewards = Parallel(n_jobs=njobs)(delayed(play_single_round)(args, model, muzero_gameplay) for _ in range(args.rounds))
+  cumulative_rewards = np.asarray(cumulative_rewards)
+  mean_reward = np.sum(cumulative_rewards) / cumulative_rewards.shape[0]
+  print("Execution time: ", time.time() - start_time)
+  print("P1 mean reward: ", mean_reward)
+  print("P2 mean reward: ", -mean_reward)
 
 def main(): 
   args = parser.parse_args()
@@ -121,11 +151,10 @@ def main():
   assert model.game.points_order == "descending", "We cannot handle exploitability of different Goofspiels"
   gp_config =MuZeroGameplayConfig(player=args.player)
   muzero_gameplay = MuZeroGameplay(model, gp_config)
+  sequential_experiment(args, model, muzero_gameplay)
+  #parallel_experiment(args, model, muzero_gameplay)
   #opp_policy = extract_rnad_policy(model, model.game, args.player) if args.opponent == "rnad" else None
-  for _ in range(args.rounds):
-    play_single_round(args, muzero_gameplay, model.game, model)
-    muzero_gameplay.reset()
-  
+
 
 
 if __name__ == "__main__":
