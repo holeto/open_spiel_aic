@@ -2,8 +2,9 @@ import argparse
 import jax.numpy as jnp
 import numpy as np
 import time
-from joblib import Parallel, delayed
+#from joblib import Parallel, delayed
 from copy import copy
+from pyinstrument import Profiler
 
 from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
 from open_spiel.python.algorithms.mu_zero.experiments.utils import load_model
@@ -81,10 +82,11 @@ def get_opponent_action(opponent:str, opp_iset, opp_legals, actions, model:MuZer
   #random opponent
   else:
     pi = np.ones_like(actions) * opp_legals
+    pi = np.asarray(pi, dtype="float64")
     pi /= np.sum(pi)
   return np.random.choice(actions, p=pi)
 
-def play_single_round(args, model:MuZeroTrain, gameplay: MuZeroGameplay, parallel:bool = True):
+def play_single_round(args, model:MuZeroTrain, gameplay: MuZeroGameplay,parallel:bool = True):
   init_info = model.game.initialize_structures()
   opp = 1 - args.player
   opp_legals = init_info[-1][opp]
@@ -99,6 +101,8 @@ def play_single_round(args, model:MuZeroTrain, gameplay: MuZeroGameplay, paralle
   
   #play until terminal
   for _ in range(model.game.cards - 1):
+    #profiler.start()
+    #start_time = time.time()
     pl_iset = p1_iset if args.player == 0 else p2_iset
     opp_iset = p2_iset if args.player == 0 else p1_iset
     pl_action = temp_gameplay.get_action(ps, pl_iset)
@@ -115,6 +119,9 @@ def play_single_round(args, model:MuZeroTrain, gameplay: MuZeroGameplay, paralle
     opp_legals = legals[opp]
     turn += 1
     _, p1_iset, p2_iset, ps = model.game.get_info(*info)
+    #print("Action choosing time: ", time.time() - start_time)
+    #profiler.stop()
+    #print(profiler.output_text(color=True, unicode=True))
   temp_gameplay.reset()
   if args.verbose:
     print("P1 reward: ", cumulative_reward)
@@ -148,9 +155,10 @@ def main():
   args = parser.parse_args()
   model = load_model(args.model_path) 
   assert isinstance(model.game, JaxOriginalGoofspiel)
-  assert model.game.points_order == "descending", "We cannot handle exploitability of different Goofspiels"
+  assert model.game.points_order == "descending", "We cannot handle gameplay of different Goofspiels"
   gp_config =MuZeroGameplayConfig(player=args.player)
   muzero_gameplay = MuZeroGameplay(model, gp_config)
+  #profiler = Profiler()
   sequential_experiment(args, model, muzero_gameplay)
   #parallel_experiment(args, model, muzero_gameplay)
   #opp_policy = extract_rnad_policy(model, model.game, args.player) if args.opponent == "rnad" else None
