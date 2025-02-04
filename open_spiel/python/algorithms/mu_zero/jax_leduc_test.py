@@ -7,13 +7,11 @@ def get_next_rng_key(key):
   key, new_key = jax.random.split(key)
   return new_key
 
-def main():
-  key = jax.random.key(99)
-  game = JaxOriginalLeduc()
-  action_history, public_card, current_chips, key, init_reaches, private_cards, legals = game.initialize_structures(key)
-  info = (action_history, public_card, current_chips)
+def test_gameplay(key, game:JaxOriginalLeduc):
+  action_history, public_card,  private_cards, current_chips, key, init_reaches, legals = game.initialize_structures(key)
+  info = (action_history, public_card, private_cards)
   all_actions = jnp.arange(legals.shape[1])
-  #print("Dealt cards: ", private_cards)
+  print("Dealt cards: ", private_cards)
   opp_action = 0
   acting_player = 0
   turn = 0
@@ -21,19 +19,42 @@ def main():
   round = 0
   turns_this_round = 0
   while not terminal:
+    state_tensor, p1_iset_tensor, p2_iset_tensor, public_state_tensor = game.get_info(*info)
+    #print("State: ", state_tensor)
+    #print("P1 iset: ", p1_iset_tensor)
+    #print("P2_iset: ", p2_iset_tensor)
+    #print("Public state: ", public_state_tensor)
     acting_legals = np.asarray(legals[acting_player], dtype="float64")
     key = get_next_rng_key(key)
     pl_action = np.random.choice(all_actions, p=acting_legals / np.sum(acting_legals))
     actions = jnp.stack([pl_action, opp_action], axis=0) if acting_player == 0 else jnp.stack([opp_action, pl_action], axis=0)
-    #print(actions)
-    #print(legals)
-    action_history, public_card, current_chips, terminal, rewards, round, turns_this_round, key, new_legals = game.apply_action(*info, key, actions, round, turns_this_round, turn)
-    info = (action_history, public_card, current_chips)
-    #print(info)
-    #print(rewards)
+    print("Actions: ", actions)
+    print("Legal actions: ")
+    print(legals)
+    action_history, public_card, private_cards, current_chips, terminal, rewards, round, turns_this_round, key, new_legals = game.apply_action(*info, current_chips, key, actions, round, turns_this_round, turn)
+    info = (action_history, public_card, private_cards)
+    
+    print("Public card: ", public_card)
+    print("Current chips: ", current_chips)
+    print("Rewards: ", rewards)
     legals = new_legals
     acting_player = 1- acting_player
     turn += 1
+
+def test_batch(key, game:JaxOriginalLeduc, batch_size):
+  action_history, public_card, private_cards, current_chips, key, init_reaches, legals = game.initialize_structures(key, batch=batch_size)
+  print(action_history.shape)
+  print(public_card.shape)  
+  print(private_cards.shape)
+  print(current_chips.shape)
+  print(legals.shape)
+
+def main():
+  key = jax.random.key(42)
+  game = JaxOriginalLeduc()
+  test_gameplay(key, game)
+  #test_batch(key, game, batch_size=20)
+  
 
 
 
