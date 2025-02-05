@@ -201,4 +201,4 @@ class JaxOriginalLeduc:
     
     key = jax.random.split(key, 1)[0]
 
-    return action_history, public_card, private_cards, current_chips, key, round, turns_this_round + 1, terminal, jnp.asarray([reward, -reward]), new_legals
+    return action_history, public_card, private_cards, current_chips, key, round, turns_this_round + 1, terminal, jnp.asarray([reward[0], -reward[0]]), new_legals
