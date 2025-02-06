@@ -8,7 +8,7 @@ import numpy as np
 from open_spiel.python.jax.cfr.jax_cfr import JAX_CFR_SIMULTANEOUS_UPDATE, regret_matching
 
 
-def check_iset_similarity(iset1, iset2, threshold=0.1):
+def check_iset_similarity(iset1, iset2, threshold=0.05):
   # return jnp.mean(jnp.abs(iset1 - iset2)) < threshold
   similarity = np.linalg.norm(iset1 - iset2, ord=2) / np.sqrt(iset1.shape[-1])
   return similarity < threshold
