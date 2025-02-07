@@ -56,13 +56,13 @@ class JaxLeduc(JaxGame):
     # One hot encoded receiving player
     # One hot encoded private card of player
     # One hot encoded public card (1 bit added to recognize not yet revealed)
-    # One hot encoded actions in each turn
-    return self.players + self.total_cards + self.total_cards + 1  + self.max_turns * (self.num_actions - 1)
+    # One hot encoded actions in each non-terminal turn
+    return self.players + self.total_cards + self.total_cards + 1  + (self.max_turns - 1) * (self.num_actions - 1)
   
   def public_state_tensor_shape(self):
     # One hot encoded public card (1 bit added to recognize not yet revealed)
-    # One hot encoded actions in each turn (not the invalid added actions)
-    return self.total_cards + 1 + self.max_turns * (self.num_actions - 1)
+    # One hot encoded actions in each non-terminal turn (not the invalid added actions)
+    return self.total_cards + 1 + (self.max_turns - 1) * (self.num_actions - 1)
   
   # !!! If you want to vmap this function, send in a vector of PRNG keys !!! 
   @functools.partial(jax.jit, static_argnums=(0))
@@ -182,4 +182,4 @@ class JaxLeduc(JaxGame):
                            current_chips = current_chips,
                            turns_this_round = turns_this_round + 1)
 
-    return new_game_state, key, terminal, jnp.asarray([reward[0], -reward[0]]), new_legals
+    return new_game_state, key, jnp.squeeze(terminal), reward[0], new_legals

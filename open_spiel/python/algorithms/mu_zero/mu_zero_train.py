@@ -823,7 +823,7 @@ class MuZeroTrain():
     game_keys = jax.random.split(key, self.config.batch_size)
     key = jax.random.split(key, (self.config.trajectory_max, self.config.batch_size, 2))
     # turns = list(range(self.game.cards -1))
-    max_turns = self.game.max_turns
+    max_turns = self.config.trajectory_max
     actions = self.actions
     
     @chex.dataclass(frozen=True)
@@ -881,11 +881,9 @@ class MuZeroTrain():
         
       )
       return new_carry, timestep
-      
-      
     _, timestep = lax.scan(_sample_trajectory,
              init=init_carry,
-             xs=(key, jnp.arange(max_turns- 1)))
+             xs=(key, jnp.arange(max_turns)))
     return timestep
     
   
