@@ -2,11 +2,12 @@ import argparse
 import jax.numpy as jnp
 import numpy as np
 import time
+import jax
 #from joblib import Parallel, delayed
 from copy import copy
 from pyinstrument import Profiler
 
-from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxOriginalGoofspiel
 from open_spiel.python.algorithms.mu_zero.experiments.utils import load_model
 from open_spiel.python.algorithms.mu_zero.mu_zero import MuZeroTrain
 from open_spiel.python.algorithms.mu_zero.mu_zero_gameplay import MuZeroGameplay, MuZeroGameplayConfig
@@ -26,50 +27,6 @@ parser.add_argument("--opponent", type=str, default="random", help="Opponent str
 parser.add_argument("--verbose", type=bool, default=False, help="Print played actions.")
 
 
-#Extracts full policy as dictionary for an RNaD opponent
-# def extract_rnad_policy(model:MuZeroTrain, game:JaxOriginalGoofspiel, player):
-#   policy = {}
-#   visited_isets = {}
-#   isets = []
-#   iset_legals = []
-#   def _extract_goofspiel_isets(states, depth: int = 0):
-#     for state in states:
-#       _, p1_iset, p2_iset, public_state = game.get_info(*state[:-1])
-#       iset = p2_iset if player == 0 else p1_iset
-#       iset_str = stringify(iset)
-#       opp_legals = state[-1][1 - player]
-#       if iset_str not in visited_isets:
-#         iset_idx = len(isets)
-#         visited_isets[iset_str] = iset_idx
-#         isets.append(iset)
-#         iset_legals.append(opp_legals)
-
-#     if depth + 2 >= game.cards:
-#       return
-#     next_states = []
-#     for state in states:
-#       for a1i, a1 in enumerate(state[-1][0]):
-#         if a1 < 0.5:
-#           continue
-#         for a2i, a2 in enumerate(state[-1][1]):
-#           if a2 < 0.5:
-#             continue
-#           new_legals, new_rewards, new_point_cards, new_played_cards, new_p1_points = game.apply_action(*state[:-1], depth, np.array([a1i, a2i])) 
-#           new_info = (new_point_cards, new_played_cards, new_p1_points, new_legals)
-#           next_states.append(new_info)
-#     _extract_goofspiel_isets(next_states, depth + 1)
-#   init_info = game.initialize_structures()
-#   _extract_goofspiel_isets([init_info])
-#   isets = np.array(isets)
-#   iset_legals = np.array(iset_legals)
-#   pi = model._jit_get_policy(model.network_parameters.rnad_params_target, isets, iset_legals)
-#   for iset, pols in zip(isets, pi):
-#     normalized_pols = np.asarray(pols, dtype="float64")
-#     normalized_pols /= np.sum(normalized_pols)
-#     policy[stringify(iset)] = normalized_pols
-#   return policy
-
-
 
 def get_opponent_action(opponent:str, opp_iset, opp_legals, actions, model:MuZeroTrain):
   #TODO: Add different opponents here
@@ -87,12 +44,12 @@ def get_opponent_action(opponent:str, opp_iset, opp_legals, actions, model:MuZer
   return np.random.choice(actions, p=pi)
 
 def play_single_round(args, model:MuZeroTrain, gameplay: MuZeroGameplay,parallel:bool = True):
-  init_info = model.game.initialize_structures()
+  init_key = jax.random.key(0)
+  game_state, key, legals = model.game.initialize_structures(init_key)
   opp = 1 - args.player
-  opp_legals = init_info[-1][opp]
+  opp_legals = legals[opp]
   
-  _, p1_iset, p2_iset, ps = model.game.get_info(*init_info[:-1])
-  info = init_info[:-1]
+  _, p1_iset, p2_iset, ps = model.game.get_info(game_state)
   turn = 0
   cumulative_reward = 0
   all_actions = np.arange(model.game.cards)
@@ -113,12 +70,11 @@ def play_single_round(args, model:MuZeroTrain, gameplay: MuZeroGameplay,parallel
     if args.verbose:
       print("Applying action: ", actions)
     actions = jnp.stack(actions, axis=0)
-    legals, rewards, point_cards, played_cards, p1_points = model.game.apply_action(*info, turn, actions)
+    game_state, key, terminal, rewards, legals = model.game.apply_action(game_state, key, turn, actions)
     cumulative_reward += rewards
-    info = (point_cards, played_cards, p1_points)
     opp_legals = legals[opp]
     turn += 1
-    _, p1_iset, p2_iset, ps = model.game.get_info(*info)
+    _, p1_iset, p2_iset, ps = model.game.get_info(game_state)
     #print("Action choosing time: ", time.time() - start_time)
     #profiler.stop()
     #print(profiler.output_text(color=True, unicode=True))

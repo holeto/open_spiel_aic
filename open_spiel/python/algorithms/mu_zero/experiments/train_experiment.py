@@ -52,7 +52,7 @@ def train(args, game, trajectory_max, save_folder):
     os.makedirs(save_folder)
   
   for iteration in range(args.iterations):
-    train_algorithm.multiple_goofspiel_steps(args.save_each)
+    train_algorithm.multiple_jax_steps(args.save_each)
     file_name = save_folder + "muzero_" + str(iteration) + ".pkl" 
     print("Saving iteration", iteration, flush=True)
     save_model(file_name, train_algorithm)

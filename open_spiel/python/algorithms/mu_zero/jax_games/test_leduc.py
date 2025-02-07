@@ -5,7 +5,7 @@ import jax
 import time
 import jax.numpy as jnp
 
-from jax_leduc import JaxOriginalLeduc, GameState
+from jax_leduc import JaxLeduc, LeducGameState
 from game_test_utils import extract_from_spiel ,histogram, compare_hists
 from pyinstrument import Profiler
 from collections import deque
@@ -16,7 +16,7 @@ parser.add_argument("--seed", type=int, default=42, help= "PRNG key seed")
 
 @chex.dataclass(frozen=True)
 class SampleTrajectoryCarry:
-  game_state: GameState
+  game_state: LeducGameState
   terminal: chex.Array
   key: chex.Array
   legal_actions: chex.Array
@@ -25,9 +25,11 @@ class SampleTrajectoryCarry:
   
 
 #Extract from jax leduc how
-#many states fall under each infoset/public state
+#many states fall under each infoset
+#and how many infosets of each player
+#fall for each public state
 def extract_from_jax_leduc(seed):
-  game = JaxOriginalLeduc()
+  game = JaxLeduc()
   #state_tensors = []
   count_states_by_isets = [{} for _ in range(2)]
   count_isets_by_public_state = [{} for _ in range(2)]
@@ -47,9 +49,6 @@ def extract_from_jax_leduc(seed):
       return []
     #simulate second chance node
     if carry.game_state.public_card[0] == 0 and game_state.public_card[0] > 0:
-      #print(turn)
-      #print(game_state)
-      #print(game_state.public_card[0])
       for c in range(6):
         if c in game_state.private_cards[0]:
           continue
@@ -57,7 +56,7 @@ def extract_from_jax_leduc(seed):
     else:
       public_cards.append(game_state.public_card)
     for pc in public_cards:
-      new_game_state = GameState( 
+      new_game_state = LeducGameState( 
         action_history = game_state.action_history,
         public_card = pc,
         private_cards = game_state.private_cards,
@@ -79,7 +78,7 @@ def extract_from_jax_leduc(seed):
       if c1 == c2:
         continue
       private_cards = jnp.array([c1, c2], dtype=int)[None, ...]
-      new_game_state = GameState(
+      new_game_state = LeducGameState(
                         action_history = game_state.action_history,
                         public_card = game_state.public_card,
                         private_cards = private_cards,
@@ -92,11 +91,8 @@ def extract_from_jax_leduc(seed):
                         key = key,
                         legal_actions = legals)
       q.append((init_carry, 0))
-  counter = 0
   while len(q) > 0:
     carry, turn = q.popleft()
-    #counter += 1
-    #print(counter)
     if(carry.terminal):
       continue
     #print(carry.game_state.current_chips)
@@ -116,20 +112,12 @@ def extract_from_jax_leduc(seed):
     if not str(state) in visited:
       legal_mask_p1 = carry.legal_actions[0][0].astype(bool)
       legal_mask_p2 = carry.legal_actions[0][1].astype(bool)
-      #masked_actions = all_actions[legal_mask].reshape((2, -1))
-      #print(carry.legal_actions[0])
       p1_actions = all_actions[0][legal_mask_p1]
       p2_actions = all_actions[1][legal_mask_p2]
       visited.append(str(state))
       for a1 in p1_actions:
         for a2 in p2_actions:
           new_carries = get_new_carries(carry, jnp.asarray([a1, a2])[jnp.newaxis, ...], turn)
-          if len(new_carries) > 1:
-            counter += 1
-            if counter > 150:
-              #print(len(new_carries))
-              print(new_carries[0].game_state.public_card)
-              print(new_carries[0].game_state.action_history)
           for new_carry in new_carries:
             q.append((new_carry, turn + 1))
   return count_states_by_isets[0].values(), count_states_by_isets[1].values(), count_isets_by_public_state[0].values(), count_isets_by_public_state[1].values()

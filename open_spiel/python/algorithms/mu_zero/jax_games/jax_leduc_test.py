@@ -1,4 +1,4 @@
-from jax_leduc import JaxOriginalLeduc
+from jax_leduc import JaxLeduc
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -6,7 +6,7 @@ import numpy as np
 from pyinstrument import Profiler
 
 
-def test_gameplay(key, game:JaxOriginalLeduc):
+def test_gameplay(key, game:JaxLeduc):
   game_state, key, legals = game.initialize_structures(key)
   all_actions = jnp.arange(legals.shape[1])
   print("Dealt cards: ", game_state.private_cards)
@@ -42,7 +42,7 @@ def choose_action(key, all_actions, acting_legals, acting_player):
   return key, actions
 
 
-def test_batch(key, game:JaxOriginalLeduc, batch_size, experiment_repeats=20):
+def test_batch(key, game:JaxLeduc, batch_size, experiment_repeats=20):
   vectorized_apply_action = jax.vmap(game.apply_action, in_axes=(0, 0, None, 0), out_axes=(0, 0, 0, 0, 0))
   vectorized_choice = jax.vmap(choose_action, in_axes=(0, 0, 0, None), out_axes=(0, 0))
   vectorized_init = jax.vmap(game.initialize_structures, in_axes=(0), out_axes=(0, 0, 0))
@@ -68,7 +68,7 @@ def test_batch(key, game:JaxOriginalLeduc, batch_size, experiment_repeats=20):
 
 def main():
   key = jax.random.key(99)
-  game = JaxOriginalLeduc()
+  game = JaxLeduc()
   #test_gameplay(key, game)
   test_batch(key, game, batch_size=10, experiment_repeats=20)
   

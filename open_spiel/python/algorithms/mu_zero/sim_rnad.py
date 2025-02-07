@@ -4,6 +4,7 @@ from open_spiel.python.algorithms.mu_zero.flax_utils import init_network_with_op
 
 from open_spiel.python.algorithms.rnad.rnad import RNaDSolver, RNaDConfig
 from open_spiel.python.policy import TabularPolicy
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame, GameState
 from open_spiel.python.algorithms.exploitability import exploitability
 
 from typing import Sequence, Any
@@ -153,8 +154,8 @@ class RNaDSimulataneous():
     
     self.rng_key = jax.random.PRNGKey(self.config.seed)
     
-    if isinstance(game, JaxOriginalGoofspiel):
-      print("Warning: you use Jax Goofspiel, so you need to use domain specific goofspiel_step method")
+    if isinstance(self.game, JaxGame):
+      print("Warning: you use Jax game, so you need to use jax_step method")
     # temp_keys = self.get_next_rng_keys(6)
     
     self.example_state  = game.new_initial_state()
@@ -332,52 +333,60 @@ class RNaDSimulataneous():
   
   
   @functools.partial(jax.jit, static_argnums=(0,))
-  def sample_goofspiel_trajectories(self, params, key) -> TimeStep:
+  def sample_jax_trajectories(self, params, key) -> TimeStep:
     key = jax.random.split(key, (self.config.trajectory_max, self.config.batch_size, 2))
     # turns = list(range(self.game.cards -1))
-    cards = self.game.cards
+    game_keys = jax.random.split(key, self.config.batch_size)
+    max_turns = self.game.max_turns
+    actions = self.game_num_actions
+    
     @chex.dataclass(frozen=True)
     class SampleTrajectoryCarry:
-      point_cards: chex.Array
-      played_cards: chex.Array
-      p1_points: chex.Array
+      game_state: GameState
+      key: chex.Array
+      terminal: chex.Array
       legal_actions: chex.Array
-      
-    point_cards, played_cards, p1_points, legal_actions = self.game.initialize_batch_structures(self.config.batch_size)
+    
+    vectorized_init = jax.vmap(self.game.initialize_structures, in_axes=(0), out_axes=(0, 0, 0))     
+    game_state, game_keys, legal_actions = vectorized_init(game_keys)
     
     @jax.jit
     def choice_wrapper(key, p):
-      action = jax.random.choice(key, cards, p=p)
-      action_oh = jax.nn.one_hot(action, cards)
+      action = jax.random.choice(key, actions, p=p)
+      action_oh = jax.nn.one_hot(action, actions)
       return action, action_oh
     
-    vectorized_get_info = jax.vmap(self.game.get_info, in_axes=(0, 0, 0), out_axes=(0, 0, 0, 0))
-    vectorized_apply_action = jax.vmap(self.game.apply_action, in_axes=(0, 0, 0, None, 0), out_axes=(0, 0, 0, 0, 0))
+    vectorized_get_info = jax.vmap(self.game.get_info, in_axes=(0), out_axes=(0, 0, 0, 0))
+    vectorized_apply_action = jax.vmap(self.game.apply_action, in_axes=(0, 0, None, 0), out_axes=(0, 0, 0, 0, 0))
     vectorized_sample_action = jax.vmap(jax.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0), in_axes=(0, 0), out_axes=0)
-    network_apply = jax.vmap(self._jit_get_policy, in_axes=(None, 0, 0), out_axes=0)
+    network_apply = jax.vmap(self._jit_get_policy, in_axes=(None, 1, 1), out_axes=1)
     
     init_carry = SampleTrajectoryCarry(
-      point_cards=point_cards,
-      played_cards=played_cards,
-      p1_points=p1_points,
-      legal_actions=legal_actions
+      game_state = game_state,
+      key = game_keys,
+      terminal= jnp.zeros((self.config.batch_size, 1), dtype=bool),
+      legal_actions = legal_actions
     )
     
     def _sample_trajectory(carry: SampleTrajectoryCarry, xs) -> tuple[SampleTrajectoryCarry, chex.Array]:
       (key, turn) = xs
-      _, p1_iset, p2_iset, _ = vectorized_get_info(carry.point_cards, carry.played_cards, carry.p1_points)
+      _, p1_iset, p2_iset, public_state = vectorized_get_info(carry.game_state)
       obs = jnp.stack((p1_iset, p2_iset), axis=1)
       pi = network_apply(params, obs, carry.legal_actions)
+      random_pi = carry.legal_actions / jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
+      pi = self.config.sampling_epsilon * random_pi + (1 - self.config.sampling_epsilon) * pi
+      # pi = carry.legal_actions / jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
       action, action_oh = vectorized_sample_action(key, pi)
-      next_legal, next_rewards, next_point_cards, next_played_cards, next_p1_points = vectorized_apply_action(carry.point_cards, carry.played_cards, carry.p1_points, turn, action)
+      next_game_state, next_key, terminal, next_rewards, next_legal = vectorized_apply_action(carry.game_state, carry.key, turn, action)
       new_carry = SampleTrajectoryCarry(
-        point_cards=next_point_cards,
-        played_cards=next_played_cards,
-        p1_points=next_p1_points,
+        next_game_state = next_game_state,
+        key = next_key,
+        terminal = terminal,
         legal_actions=next_legal
       )
       timestep = TimeStep(
-        valid = jnp.ones_like(next_rewards),
+        valid = jnp.ones_like(next_rewards) - terminal,
+        public_state = public_state,
         obs = obs,
         legal = carry.legal_actions,
         action = action_oh,
@@ -390,7 +399,7 @@ class RNaDSimulataneous():
       
     _, timestep = lax.scan(_sample_trajectory,
              init=init_carry,
-             xs=(key, jnp.arange(cards - 1)))
+             xs=(key, jnp.arange(max_turns- 1)))
     return timestep
     
   
@@ -563,7 +572,7 @@ class RNaDSimulataneous():
     self.learner_steps += 1
     
   @functools.partial(jax.jit, static_argnums=(0,))
-  def update_goofspiel_parameters(
+  def update_jax_parameters(
     self,
     params: chex.ArrayTree,
     params_target: chex.ArrayTree,
@@ -575,17 +584,17 @@ class RNaDSimulataneous():
     alpha,
     update_net, 
   ):
-    trajectory = self.sample_goofspiel_trajectories(params, key)
+    trajectory = self.sample_jax_trajectories(params, key)
     params, params_target, params_prev, params_prev_, optimizer, optimizer_target = self.update_parameters(
       params, params_target, params_prev, params_prev_, optimizer, optimizer_target, lax.stop_gradient(trajectory), alpha, update_net)
     
     return params, params_target, params_prev, params_prev_, optimizer, optimizer_target
     
-  def goofspiel_step(self):
+  def jax_step(self):
     key = self.get_next_rng_key()
     alpha, update_regularization = self._entropy_schedule(self.learner_steps)
     
-    self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target = self.update_goofspiel_parameters(
+    self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target = self.update_jax_parameters(
       self.params, self.params_target, self.params_prev, self.params_prev_, self.optimizer, self.optimizer_target, key, alpha, update_regularization)
 
     self.learner_steps +=1
@@ -625,37 +634,40 @@ class RNaDSimulataneous():
   
     return policy
   
-  def extract_goofspiel_policy(self, game):
-    assert isinstance(self.game, JaxOriginalGoofspiel)
+  #WARNING!! This method will not extract full
+  #policy for JAX games with chance nodes
+  def extract_jax_policy(self, game):
+    assert isinstance(self.game, JaxGame)
     iset_set = []
     isets, legals = [], []
-    def _traverse_tree(state: pyspiel.State, info):
+    def _traverse_tree(state: pyspiel.State, game_state, key, current_legals, turn = 0):
       if state.is_terminal():
         return
       p1_iset = state.information_state_string(0)
       p2_iset = state.information_state_string(1)
-      _, p1_goof_iset, p2_goof_iset, _ = self.game.get_info(info[0], info[1], info[2])
+      _, p1_goof_iset, p2_goof_iset, _ = self.game.get_info(game_state)
       if not p1_iset in iset_set:
         iset_set.append(p1_iset)
         isets.append(p1_goof_iset) 
-        legals.append(info[3][0])
+        legals.append(current_legals[0])
       if not p2_iset in iset_set:
         iset_set.append(p2_iset)
         isets.append(p2_goof_iset)
-        legals.append(info[3][1])
+        legals.append(current_legals[1])
       for a1 in state.legal_actions(0):
         for a2 in state.legal_actions(1):
           new_state = state.clone()
           new_state.apply_actions([a1, a2])
-          new_legals, new_rewards, new_point_cards, new_played_cards, new_p1_points = self.game.apply_action(info[0], info[1], info[2], info[4], np.array([a1, a2]))
-          _traverse_tree(new_state, (new_point_cards, new_played_cards, new_p1_points, new_legals, info[4]+1))
-          
-    init_info = self.game.initialize_structures()
+          new_game_state, new_key, terminal, new_rewards, new_legals = self.game.apply_action(game_state, key, turn, np.array([a1, a2]))
+          _traverse_tree(new_state, new_game_state, new_key, new_legals, turn + 1)
+
+    key = jax.random.key(self.config.seed)    
+    init_state, key, legals = self.game.initialize_structures(key)
     init_info = (*init_info, 0)
-    _traverse_tree(game.new_initial_state(), init_info)
+    _traverse_tree(game.new_initial_state(), init_state, key, legals)
     isets = np.array(isets, dtype=np.float32)
     legals = np.array(legals, dtype=np.int8)
-    pi = self._jit_get_policy(self.params_target, isets, legals)
+    pi = self._jit_get_policy(self.network_parameters.rnad_params_target, isets, legals)
     policy = TabularPolicy(game)
     # policy.
     for i, iset in enumerate(iset_set):
@@ -670,7 +682,7 @@ class RNaDSimulataneous():
   
   
 from open_spiel.python.algorithms.best_response import BestResponsePolicy
-from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxOriginalGoofspiel
 
 def main():
   cards = 5
@@ -698,7 +710,7 @@ def main():
   # profiler = Profiler()
   # profiler.start()
   for _ in range(50000):
-    muzero.goofspiel_step()
+    muzero.jax_step()
      
   
   # profiler.stop()
@@ -706,7 +718,7 @@ def main():
   
   # policy = muzero.extract_full_policy()
     
-  policy = muzero.extract_goofspiel_policy(orig_game)
+  policy = muzero.extract_jax_policy(orig_game)
   
   # print(policy.action_probabilities(state, 0))
   # print(policy.action_probabilities(state, 1))

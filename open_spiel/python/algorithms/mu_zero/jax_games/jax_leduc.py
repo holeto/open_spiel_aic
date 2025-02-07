@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import chex
 
 import functools
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame, GameState
 
 INVALID_ID = 0
 FOLD_ID = 1
@@ -10,7 +11,7 @@ CALL_ID = 2
 RAISE_ID = 3
 
 @chex.dataclass(frozen=True)
-class GameState:
+class LeducGameState(GameState):
     action_history: chex.Array
     public_card: chex.Array
     private_cards: chex.Array
@@ -18,14 +19,13 @@ class GameState:
     turns_this_round: chex.Array
 
 
-class JaxOriginalLeduc:
+class JaxLeduc(JaxGame):
   def __init__(self, starting_player=0):
     #Invalid action, fold, call, raise
     self.num_actions = 4
     #Two rounds and in each the maximum length trajectory consists of
-    # actions Call, Raise, Raise, [Call or Fold], minus one action
-    # because terminals are not counted
-    self.max_turns = 7
+    # actions Call, Raise, Raise, [Call or Fold],
+    self.max_turns = 8
     #Cards in two suits, three cards from each suit
     self.total_cards = 6
     self.players = 2
@@ -43,8 +43,6 @@ class JaxOriginalLeduc:
     #self.chance_outcomes = 120
     #JAX constants TODO: Probably put this somewhere else
     self.invalid_action_mask = jax.nn.one_hot(INVALID_ID, self.num_actions)
-    #self.possible_public_cards = None
-    #self.player_card_types = None
 
 
   def new_initial_state(self):
@@ -78,8 +76,10 @@ class JaxOriginalLeduc:
       p1_legal_mask = self.invalid_action_mask
       p2_legal_mask = starting_action_mask
     current_chips = jnp.ones(self.players)
-    #[H, A]
-    action_history = jnp.zeros([self.max_turns, self.num_actions - 1])
+    #[H - 1, A - 1]
+    #action history does not contain the last action as that
+    #will always take the game to a terminal state
+    action_history = jnp.zeros([self.max_turns - 1, self.num_actions - 1])
     cards = jnp.arange(self.total_cards)[..., None]
     p1_private_cards = jnp.repeat(cards, self.total_cards - 1, axis=0)
     #TODO: This can probably be done better.
@@ -91,58 +91,15 @@ class JaxOriginalLeduc:
     chosen_cards = jax.random.choice(key, private_cards, axis=0)
     key = jax.random.split(key, 1)[0]
     legals = jnp.stack([p1_legal_mask, p2_legal_mask], axis=0)
-    game_state = GameState(action_history=action_history,
+    game_state = LeducGameState(action_history=action_history,
                             public_card = public_card,
                             private_cards=chosen_cards,
                             current_chips = current_chips,
                             turns_this_round = turns_this_round)
     return game_state, key, legals
   
-  # @functools.partial(jax.jit, static_argnums=(0, 1))
-  # def _jit_batch_initialize_structures(self, batch, key):
-  #   fold_oh = jax.nn.one_hot(FOLD_ID, self.num_actions)
-  #   starting_action_mask = jnp.ones(self.num_actions) - self.invalid_action_mask - fold_oh
-  #   if self.starting_player == 0:
-  #     p1_legal_mask = starting_action_mask
-  #     p2_legal_mask = self.invalid_action_mask
-  #   if self.starting_player == 1:
-  #     p1_legal_mask = self.invalid_action_mask
-  #     p2_legal_mask = starting_action_mask
-  #   current_chips = jnp.ones([batch, self.players])
-  #   #[Batch, H, A]
-  #   action_history = jnp.zeros([batch, self.max_turns, self.num_actions - 1])
-  #   cards = jnp.arange(self.total_cards)[..., None]
-  #   p1_private_cards = jnp.repeat(cards, self.total_cards - 1, axis=0)
-  #   #TODO: This can probably be done better.
-  #   p2_private_cards = jnp.concatenate([jnp.r_[0:i:1, i+1:self.total_cards:1] for i in range(self.total_cards)])[..., None]
-  #   private_cards = jnp.concatenate([p1_private_cards, p2_private_cards], axis=1)
-  #   chosen_cards = jax.random.choice(key, private_cards, axis=0, shape=(batch, ))
-  #   #private_cards = jnp.repeat(jnp.concatenate([p1_private_cards, p2_private_cards], axis=1), [self.public_chance_outcomes, 1])
-  #   public_card = jnp.zeros([batch, 1], dtype=int)
-  #   turns_this_round = jnp.zeros([batch, 1], dtype=int)
-  #   keys = jax.random.split(key, batch)
-  #   #[Batch, Pl, A]
-  #   batch_legals = jnp.tile(jnp.stack([p1_legal_mask, p2_legal_mask], axis=0), (batch, 1, 1))
-  #   return action_history, public_card, chosen_cards, current_chips, turns_this_round, keys, batch_legals
-
-  # def initialize_structures(self, key, batch=-1):
-  #   if batch ==-1:
-  #     action_history, public_card, chosen_private_cards, current_chips,turns_this_round, keys, legals = self._jit_initialize_structures(key)
-  #   else:
-  #     action_history, public_card, chosen_private_cards, current_chips, turns_this_round, keys, legals = self._jit_batch_initialize_structures(batch, key)   
-  #   #used_cards = jnp.sort(chosen_private_cards.ravel())
-  #   #self.possible_public_cards = jnp.r_[0:used_cards[0]:1, used_cards[0]+1:used_cards[1]:1, used_cards[1]+1:self.total_cards:1]
-  #   #Integer division by 2 places cards into the [J1, J2], [Q1, Q2], [K1, K2] buckets
-  #   #self.player_card_types = jnp.floor_divide(used_cards, 2)
-  #   game_state = GameState(action_history=action_history,
-  #                          public_card = public_card,
-  #                          private_cards=chosen_private_cards,
-  #                          current_chips = current_chips,
-  #                          turns_this_round = turns_this_round)
-  #   return game_state, keys, legals
-  
   @functools.partial(jax.jit, static_argnums=(0))
-  def get_info(self, game_state:GameState):
+  def get_info(self, game_state:LeducGameState):
     #One additional bit for public card not dealt yet
     public_card_oh = jax.nn.one_hot(game_state.public_card, self.total_cards + 1)
     public_state_tensor = jnp.concatenate([public_card_oh.ravel(), game_state.action_history.ravel()], axis=0)
@@ -157,20 +114,14 @@ class JaxOriginalLeduc:
 
     return state_tensor, p1_iset_tensor, p2_iset_tensor, public_state_tensor
   
-  # def get_info(self, game_state, batch=-1):
-  #   if batch == -1:
-  #     info_getter = self._jit_get_info
-  #   else:
-  #     info_getter = jax.vmap(self._jit_get_info, in_axes=(0, 0, 0), out_axes=(0, 0, 0, 0))
-  #   state_tensor, p1_iset_tensor, p2_iset_tensor, public_state_tensor = info_getter(game_state)
-  #   return state_tensor, p1_iset_tensor, p2_iset_tensor, public_state_tensor
-  
 
   #TODO: This could surely be improved by passing and returning less stuff
   @functools.partial(jax.jit, static_argnums=(0))
-  def apply_action(self, game_state:GameState , key, turn, actions):
+  def apply_action(self, game_state:LeducGameState , key, turn, actions):
     oh_actions = jax.nn.one_hot(actions, self.num_actions)
-    oh_turn = jax.nn.one_hot(turn, self.max_turns)
+    #action history does not contain the last action as that
+    #will always take the game to a terminal state
+    oh_turn = jax.nn.one_hot(turn, self.max_turns - 1)
     fold_oh = jax.nn.one_hot(FOLD_ID, self.num_actions)
     raise_oh = jax.nn.one_hot(RAISE_ID, self.num_actions)
 
@@ -225,16 +176,10 @@ class JaxOriginalLeduc:
     
     key = jax.random.split(key, 1)[0]
 
-    new_game_state = GameState(action_history=action_history,
+    new_game_state = LeducGameState(action_history=action_history,
                            public_card = public_card,
                            private_cards=game_state.private_cards,
                            current_chips = current_chips,
                            turns_this_round = turns_this_round + 1)
 
     return new_game_state, key, terminal, jnp.asarray([reward[0], -reward[0]]), new_legals
-  
-  # def apply_action(game_state, key, turn, actions, batch=-1):
-  #   if batch == -1:
-  #     pass
-  #   pass
-    

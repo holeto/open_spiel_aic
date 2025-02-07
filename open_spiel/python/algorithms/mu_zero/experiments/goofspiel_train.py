@@ -3,14 +3,14 @@ import numpy as np
 import argparse
 
 from open_spiel.python.algorithms.mu_zero.experiments.train_experiment import train
-from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxOriginalGoofspiel
 
 
 parser = argparse.ArgumentParser()
 
 # Training setting
-parser.add_argument("--save_each", type=int, default=10, help="Save network each amount of iterations")
-parser.add_argument("--iterations", type=int, default=2, help="MuZero network training iterations,  the whole algorithm will run for --iterations * --save_each")
+parser.add_argument("--save_each", type=int, default=1000, help="Save network each amount of iterations")
+parser.add_argument("--iterations", type=int, default=10, help="MuZero network training iterations,  the whole algorithm will run for --iterations * --save_each")
 parser.add_argument("--save_folder", type=str, default="muzero_networks", help="Path to the saved trained networks")
 
 # Algorithm setting

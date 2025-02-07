@@ -7,7 +7,7 @@ import chex
 import numpy as np
 import queue
 
-from open_spiel.python.algorithms.mu_zero.jax_goofspiel import JaxOriginalGoofspiel
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxOriginalGoofspiel
 from open_spiel.python.algorithms.mu_zero.mu_zero_train import MuZeroTrain
 from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFRConstants, MuZeroCFR, check_iset_similarity
 
@@ -32,7 +32,7 @@ def find_next_root(cfr: MuZeroCFR, tree_depth: int, player: int, public_state, i
   public_state_histories = cfr.find_public_state_from_iset(iset, player, tree_depth)
   history_reaches = cfr.find_reaches_from_average()[tree_depth][:, public_state_histories]
   # TODO: Use numpy or jax.numpy?
-  next_reaches = jnp.where(jnp.array([[player == 0], [player == 1]]), history_reaches, 1.0) 
+  next_reaches = jnp.where(jnp.array([[player == 0], [player == 1]]), history_reaches, 1.0)
   next_isets_id = cfr.constants.depth_history_iset[tree_depth][:, public_state_histories]
   next_cf_values = cfr.cf_values[tree_depth][opponent][next_isets_id[opponent]]
   next_isets = cfr.constants.depth_iset_map[tree_depth][opponent][next_isets_id[opponent]]
@@ -150,7 +150,7 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, depth_limit, isets, 
     depth_history_actions.append(actions)
     depth_history_legal.append(legal)  
     depth_history_next_history.append(next_history.astype(int))
-    
+
     if np.all(next_history < 0):
       return
     
@@ -241,8 +241,9 @@ class MuZeroGameplay:
   # First finds the information states and public states from the game, then pushes them through abstraction layer
   def initialize_isets(self):
     if isinstance(self.muzero.game, JaxOriginalGoofspiel):
-      init_info = self.muzero.game.initialize_structures()[:-1] # Last thing is a legal actions
-      _, *self.init_info = self.muzero.game.get_info(*init_info) 
+      key = jax.random.key(0)
+      game_state, key, legals = self.muzero.game.initialize_structures(key) 
+      _, *self.init_info = self.muzero.game.get_info(game_state) 
     else:
       state = self.muzero.game.new_initial_state()
       self.init_info =  np.array(state.information_state_tensor(0)), np.array(state.information_state_tensor(1)), np.array(state.public_state_tensor())
@@ -260,7 +261,7 @@ class MuZeroGameplay:
    
    
   def find_next_root(self, public_state, iset):
-    find_next_root(self.cfr, self.tree_depth, self.config.player, public_state, iset)
+    return find_next_root(self.cfr, self.tree_depth, self.config.player, public_state, iset)
 
   def find_root_from_previous(self, public_state, iset):
     
@@ -315,7 +316,6 @@ class MuZeroGameplay:
     return policy
 
   def get_action(self, public_state, iset):
-    #TODO: Except first step, no policy for iset is found
     
     abstracted_iset = self.muzero.get_abstraction(public_state, iset, self.config.player)
     self.tree_depth += 1

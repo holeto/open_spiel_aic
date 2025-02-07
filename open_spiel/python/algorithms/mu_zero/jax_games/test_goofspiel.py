@@ -3,7 +3,7 @@ import argparse
 import chex
 import jax
 import jax.numpy as jnp
-from jax_goofspiel import JaxOriginalGoofspiel
+from jax_goofspiel import JaxOriginalGoofspiel, GoofspielGameState
 from game_test_utils import extract_from_spiel ,histogram, compare_hists
 from collections import deque
 
@@ -14,9 +14,9 @@ parser.add_argument("--points_order", type=str, default="descending", help= "Goo
 
 @chex.dataclass(frozen=True)
 class SampleTrajectoryCarry:
-  point_cards: chex.Array
-  played_cards: chex.Array
-  p1_points: chex.Array
+  game_state: GoofspielGameState
+  terminal: chex.Array
+  key: chex.Array
   legal_actions: chex.Array
 
   
@@ -29,30 +29,34 @@ def extract_from_jax_goofspiel(cards, points_order):
   count_states_by_isets = [{} for _ in range(2)]
   count_states_by_public_state = {}
   all_actions = jnp.tile(jnp.arange(cards), (2, 1))
-  #print(all_actions)
+  #this is not a game with chance nodes, key will not be used
+  key = jax.random.key(42)
+  keys = jax.random.split(key, 1)
   #represent state as the carry information from it
-  point_cards, played_cards, p1_points, legal_actions = game.initialize_batch_structures(1)
-  init_carry = SampleTrajectoryCarry(point_cards =point_cards,
-                                played_cards = played_cards,
-                                p1_points = p1_points,
-                                legal_actions = legal_actions)
-  vectorized_get_info = jax.vmap(game.get_info, in_axes=(0, 0, 0), out_axes=(0, 0, 0, 0))
-  vectorized_apply_action = jax.vmap(game.apply_action, in_axes=(0, 0, 0, None, 0), out_axes=(0, 0, 0, 0, 0))
+  vectorized_init = jax.vmap(game.initialize_structures, in_axes=(0), out_axes=(0, 0, 0))
+  game_state, key, legals = vectorized_init(keys)
+  vectorized_get_info = jax.vmap(game.get_info, in_axes=(0), out_axes=(0, 0, 0, 0))
+  vectorized_apply_action = jax.vmap(game.apply_action, in_axes=(0, 0, None, 0), out_axes=(0, 0, 0, 0, 0))
   def get_new_carry(carry : SampleTrajectoryCarry, joint_action, turn):
-    next_legal, rewards, next_point_cards, next_played_cards, next_p1_points = vectorized_apply_action(carry.point_cards, carry.played_cards, carry.p1_points, turn, joint_action)
+    game_state, key, terminal, rewards, legals = vectorized_apply_action(carry.game_state, carry.key, turn, joint_action)
     new_carry = SampleTrajectoryCarry(
-      point_cards=next_point_cards,
-      played_cards=next_played_cards,
-      p1_points=next_p1_points,
-      legal_actions=next_legal
+      game_state = game_state,
+      terminal= terminal,
+      key = key,
+      legal_actions = legals
     )
     return new_carry
   q = deque()
   visited = []
+  init_carry = SampleTrajectoryCarry(
+                        game_state = game_state,
+                        terminal= jnp.zeros([1,1], dtype=bool),
+                        key = key,
+                        legal_actions = legals)
   q.append((init_carry, 0))
   while len(q) > 0:
     carry, turn = q.popleft()
-    state, p1_iset, p2_iset, public_state = vectorized_get_info(carry.point_cards, carry.played_cards, carry.p1_points)
+    state, p1_iset, p2_iset, public_state = vectorized_get_info(carry.game_state)
     #squeeze out the 1-element batch
     infosets_str = [jnp.array_str(p1_iset[0]), jnp.array_str(p2_iset[0])]
     public_state_str = jnp.array_str(public_state[0])
@@ -73,12 +77,11 @@ def extract_from_jax_goofspiel(cards, points_order):
       p1_actions = all_actions[0][legal_mask_p1]
       p2_actions = all_actions[1][legal_mask_p2]
       visited.append(str(carry))
-      if(len(p1_actions) <= 2):
-        continue
       for a1 in p1_actions:
         for a2 in p2_actions:
           new_carry = get_new_carry(carry, jnp.asarray([a1, a2])[jnp.newaxis, ...], turn)
-          q.append((new_carry, turn + 1))
+          if not new_carry.terminal:
+            q.append((new_carry, turn + 1))
   return count_states_by_isets[0].values(), count_states_by_isets[1].values(), count_states_by_public_state.values()
 
 
@@ -116,9 +119,6 @@ def main():
   print("JAX")
   print(jax_public_state_hist)
   compare_hists(public_state_hist, jax_public_state_hist)
-  #assert(jnp.equal(states, jax_states), "State tensors of the two versions do not match")
-  #assert(jnp.equal(isets, jax_isets), "Infoset tensors of the two versions do not match")
-  #assert(jnp.equal(public_states, jax_public_states), "Public state tensors of the two versions do not match.")
 
 if __name__ == "__main__":
   main()

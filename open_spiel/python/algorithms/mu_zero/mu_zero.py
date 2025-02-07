@@ -871,7 +871,7 @@ class MuZeroTrain():
         legal_actions=next_legal
       )
       timestep = TimeStep(
-        valid = jnp.ones_like(next_rewards) - carry.terminal,
+        valid = jnp.ones_like(next_rewards) - terminal,
         public_state = public_state,
         obs = obs,
         legal = carry.legal_actions,
@@ -2210,7 +2210,7 @@ from open_spiel.python.algorithms.best_response import BestResponsePolicy
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxOriginalGoofspiel
 
 def main():
-  cards = 3
+  cards = 5
   points_order = "descending"
   
   # params = {"num_cards": 5, "num_turns": 3, "first_round": 0}
@@ -2234,7 +2234,7 @@ def main():
   # profiler = Profiler()
   # profiler.start()
   with chex.fake_jit():
-    for _ in range(1):
+    for _ in range(1000):
       muzero.jax_step()
   print("Trained")
      
