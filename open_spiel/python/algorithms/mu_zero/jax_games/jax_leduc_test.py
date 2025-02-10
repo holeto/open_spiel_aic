@@ -26,13 +26,14 @@ def test_gameplay(key, game:JaxLeduc):
     print("Actions: ", actions)
     print("Legal actions: ")
     print(legals)
+    prev_public_card = game_state.public_card
     game_state, key, terminal, rewards, new_legals= game.apply_action(game_state, key, turn, actions)
     
     print("Public card: ", game_state.public_card)
     print("Current chips: ", game_state.current_chips)
     print("Rewards: ", rewards)
     legals = new_legals
-    acting_player = 1- acting_player
+    acting_player = 0 if prev_public_card == 0 and game_state.public_card > 0 else 1 - acting_player
     turn += 1
 
 def choose_action(key, all_actions, acting_legals, acting_player):
@@ -67,10 +68,10 @@ def test_batch(key, game:JaxLeduc, batch_size, experiment_repeats=20):
    
 
 def main():
-  key = jax.random.key(99)
+  key = jax.random.key(42)
   game = JaxLeduc()
-  #test_gameplay(key, game)
-  test_batch(key, game, batch_size=10, experiment_repeats=20)
+  test_gameplay(key, game)
+  #test_batch(key, game, batch_size=10, experiment_repeats=20)
   
 
 

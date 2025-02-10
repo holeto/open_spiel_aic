@@ -20,7 +20,7 @@ class LeducGameState(GameState):
 
 
 class JaxLeduc(JaxGame):
-  def __init__(self, starting_player=0):
+  def __init__(self):
     #Invalid action, fold, call, raise
     self.num_actions = 4
     #Two rounds and in each the maximum length trajectory consists of
@@ -29,7 +29,6 @@ class JaxLeduc(JaxGame):
     #Cards in two suits, three cards from each suit
     self.total_cards = 6
     self.players = 2
-    self.starting_player = starting_player
     #Max 4 raises. Starting at 1, raises in the first
     # round are 2 + 2 and in the second round 4 + 4
     self.max_bet_amount = 13
@@ -69,12 +68,9 @@ class JaxLeduc(JaxGame):
   def initialize_structures(self, key):
     fold_oh = jax.nn.one_hot(FOLD_ID, self.num_actions)
     starting_action_mask = jnp.ones(self.num_actions) - self.invalid_action_mask - fold_oh
-    if self.starting_player == 0:
-      p1_legal_mask = starting_action_mask
-      p2_legal_mask = self.invalid_action_mask
-    if self.starting_player == 1:
-      p1_legal_mask = self.invalid_action_mask
-      p2_legal_mask = starting_action_mask
+    #We assume that player 1 is the starting one      
+    p1_legal_mask = starting_action_mask
+    p2_legal_mask = self.invalid_action_mask
     current_chips = jnp.ones(self.players)
     #[H - 1, A - 1]
     #action history does not contain the last action as that
@@ -124,10 +120,11 @@ class JaxLeduc(JaxGame):
     oh_turn = jax.nn.one_hot(turn, self.max_turns - 1)
     fold_oh = jax.nn.one_hot(FOLD_ID, self.num_actions)
     raise_oh = jax.nn.one_hot(RAISE_ID, self.num_actions)
-
-    next_player = (self.starting_player + ((turn + 1) % 2)) % self.players
+    
+    #We assume that player 1 is the starting one
+    current_player = game_state.turns_this_round % 2
     max_chips = jnp.max(game_state.current_chips)
-    oh_valid_action = jax.nn.one_hot(actions[1- next_player] - 1, self.num_actions - 1)
+    oh_valid_action = jax.nn.one_hot(actions[current_player] - 1, self.num_actions - 1)
 
     #Integer division by 2 places cards into the [J1, J2], [Q1, Q2], [K1, K2] buckets
     player_card_types = jnp.floor_divide(game_state.private_cards, 2)
@@ -136,25 +133,30 @@ class JaxLeduc(JaxGame):
     round = game_state.public_card > 0
 
     
-    folded = jnp.any(oh_actions[1 - next_player] * fold_oh)
+    folded = jnp.any(oh_actions[current_player] * fold_oh)
     raised = jnp.sum(oh_actions * raise_oh, axis=1)
 
     tie = jnp.all(jnp.isclose(player_card_types[0], player_card_types[1]))
     card_matched = jnp.any(jnp.floor_divide(game_state.public_card - 1, 2) == player_card_types)
     winner = jnp.where(card_matched, jnp.argmin(jnp.abs(jnp.floor_divide(game_state.public_card - 1, 2) - player_card_types)), jnp.argmax(player_card_types))
-    winner = jnp.where(folded, next_player, winner)
+    winner = jnp.where(folded, 1 - current_player, winner)
 
     this_turn_played = oh_valid_action[..., None, :] * oh_turn[None, :, None]
     action_history = (game_state.action_history + this_turn_played)[0]
 
     #Taking advantage of the fact, that raises can only happen after each other
-    num_raises = jnp.where(turn > 0, action_history[turn - 1, RAISE_ID - 1] + raised[1 - next_player], 0)
+    num_raises = jnp.where(turn > 0, action_history[turn - 1, RAISE_ID - 1] + raised[current_player], 0)
 
     action_chips = jnp.concatenate([jnp.repeat(game_state.current_chips[..., None], 2, axis =1), jnp.array([max_chips, max_chips])[..., None] * jnp.ones(2)], axis=1)
     current_chips = jnp.sum(action_chips * oh_actions, axis=1)
     current_chips = current_chips + (raised * (round + 1) * self.raise_amount)
     
     bets_equal = jnp.all(jnp.isclose(current_chips[0], current_chips[1]))
+    play_chance = jnp.logical_and(jnp.logical_and(turn >= 1, round == 0), bets_equal) 
+    public_card = jnp.where(play_chance, jax.random.choice(key, possible_public_cards) + 1, game_state.public_card)
+    #make sure to properly reset to ready for the new round
+    turns_this_round = jnp.where(play_chance, -1, game_state.turns_this_round)
+    next_player = (turns_this_round + 1) % 2
     
     new_acting_legals = jnp.ones(self.num_actions) - self.invalid_action_mask
     #whether raise is still possible
@@ -163,10 +165,7 @@ class JaxLeduc(JaxGame):
     new_acting_legals = jnp.where(bets_equal, new_acting_legals - fold_oh, new_acting_legals)
     new_legals = jnp.where(next_player == 0, jnp.stack([new_acting_legals, self.invalid_action_mask], axis=0), jnp.stack([self.invalid_action_mask, new_acting_legals], axis=0))
 
-    play_chance = jnp.logical_and(jnp.logical_and(turn >= 1, round == 0), bets_equal)
-    public_card = jnp.where(play_chance, jax.random.choice(key, possible_public_cards) + 1, game_state.public_card)
-    #make sure to properly reset to ready for the new round
-    turns_this_round = jnp.where(play_chance, -1, game_state.turns_this_round)
+   
 
     terminal = jnp.logical_or(folded, jnp.logical_and(jnp.logical_and(round > 0, turns_this_round >= 1), bets_equal))
     
