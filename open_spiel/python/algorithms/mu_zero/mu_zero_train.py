@@ -820,8 +820,9 @@ class MuZeroTrain():
   
   @functools.partial(jax.jit, static_argnums=(0,))
   def sample_jax_trajectories(self, params, key) -> TimeStep:
-    game_keys = jax.random.split(key, self.config.batch_size)
-    key = jax.random.split(key, (self.config.trajectory_max, self.config.batch_size, 2))
+    action_key, chance_key = jax.random.split(key)
+    game_keys = jax.random.split(action_key, self.config.batch_size)
+    trajectory_key = jax.random.split(chance_key, (self.config.trajectory_max, self.config.batch_size, 2))
     # turns = list(range(self.game.cards -1))
     max_turns = self.config.trajectory_max
     actions = self.actions
@@ -883,7 +884,7 @@ class MuZeroTrain():
       return new_carry, timestep
     _, timestep = lax.scan(_sample_trajectory,
              init=init_carry,
-             xs=(key, jnp.arange(max_turns)))
+             xs=(trajectory_key, jnp.arange(max_turns)))
     return timestep
     
   
