@@ -1,7 +1,6 @@
 
 from open_spiel.python.algorithms.rnad.rnad import _legal_policy, legal_log_policy, EntropySchedule
 from open_spiel.python.algorithms.mu_zero.flax_utils import init_network_with_optimizer, init_params_optimizer, optax_optimizer
-from open_spiel.python.algorithms.mu_zero.sim_rnad import RNaDNework
 
 from open_spiel.python.algorithms.rnad.rnad import RNaDSolver, RNaDConfig
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame, GameState
@@ -230,6 +229,25 @@ class ExpectedNetwork(nn.Module):
     x = nn.Dense(1)(x)
     return x
  
+class RNaDNework(nn.Module):
+  hidden_size: int
+  out_dims: int
+  
+  
+  @nn.compact
+  def __call__(self, x, legal):
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    logit = nn.Dense(self.out_dims)(x)
+    v = nn.Dense(1)(x)
+    
+    pi = _legal_policy(logit, legal)
+    log_pi = legal_log_policy(logit, legal)
+    
+    return pi, v, log_pi, logit
+
 class SimilarityMetric(str, Enum):
   POLICY = "policy"
   VALUE = "value"
