@@ -36,8 +36,9 @@ def get_tabular_from_string(policy: dict, orig_game: pyspiel.Game, jax_game: Jax
       for a2 in state.legal_actions(1):
         new_state = state.clone()
         new_state.apply_actions([a1, a2])
-        new_game_state, new_key, new_terminal, new_rewards, new_legals = jax_game.apply_action(game_state, key, depth, np.array([a1, a2]))
-        _traverse_tree(new_state, new_game_state, new_key, depth +1)
+        next_key, action_key = jax.random.split(key)
+        new_game_state, new_terminal, new_rewards, new_legals = jax_game.apply_action(game_state, action_key, depth, np.array([a1, a2]))
+        _traverse_tree(new_state, new_game_state, next_key, depth +1)
   #using seed 0 here, as this is not a game with chance nodes it can be arbitrary
   start_key = jax.random.key(0)
   _traverse_tree(orig_game.new_initial_state(), *jax_game.initialize_structures(start_key)[:-1])

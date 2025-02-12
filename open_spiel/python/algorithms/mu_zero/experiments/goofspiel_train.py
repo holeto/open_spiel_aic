@@ -3,14 +3,14 @@ import numpy as np
 import argparse
 
 from open_spiel.python.algorithms.mu_zero.experiments.train_experiment import train
-from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxOriginalGoofspiel
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxGoofspiel
 
 
 parser = argparse.ArgumentParser()
 
 # Training setting
 parser.add_argument("--save_each", type=int, default=1000, help="Save network each amount of iterations")
-parser.add_argument("--iterations", type=int, default=10, help="MuZero network training iterations,  the whole algorithm will run for --iterations * --save_each")
+parser.add_argument("--iterations", type=int, default=3, help="MuZero network training iterations,  the whole algorithm will run for --iterations * --save_each")
 parser.add_argument("--save_folder", type=str, default="muzero_networks", help="Path to the saved trained networks")
 
 # Algorithm setting
@@ -52,17 +52,17 @@ parser.add_argument("--entropy_schedule_size", type=int, nargs='+', default=[200
 
 parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate")
 parser.add_argument("--target_network_update", type=float, default=1e-3, help="Target network update")
-parser.add_argument("--seed", type=int, default=42, help="Random seed")
+parser.add_argument("--seed", type=int, default=482, help="Random seed")
 
 #Game setting:
-parser.add_argument("--cards", type=int, default=3, help="Goofspiel cards")
+parser.add_argument("--cards", type=int, default=4, help="Goofspiel cards")
 parser.add_argument("--points_order", type=str, default="descending", help="Goofspiel type, choices are descending and previous")
 
 def main(): 
   args = parser.parse_args() 
   # We only have descending points order for now
   assert args.points_order == "descending"# or args.points_order == "previous"
-  game = JaxOriginalGoofspiel(args.cards, args.points_order)
+  game = JaxGoofspiel(args.cards, args.points_order)
   folder = args.save_folder + "/goofspiel_" + str(args.cards) + "_" + args.points_order + "/" + "seed_" + str(args.seed) + "/"
   
   trajectory_max = args.cards - 1

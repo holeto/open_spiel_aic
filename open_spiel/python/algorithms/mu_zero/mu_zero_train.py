@@ -820,9 +820,9 @@ class MuZeroTrain():
   
   @functools.partial(jax.jit, static_argnums=(0,))
   def sample_jax_trajectories(self, params, key) -> TimeStep:
-    action_key, chance_key = jax.random.split(key)
+    action_key, chance_key, = jax.random.split(key)
     game_keys = jax.random.split(action_key, self.config.batch_size)
-    trajectory_key = jax.random.split(chance_key, (self.config.trajectory_max, self.config.batch_size, 2))
+    trajectory_key = jax.random.split(chance_key, self.config.trajectory_max)
     # turns = list(range(self.game.cards -1))
     max_turns = self.config.trajectory_max
     actions = self.actions
@@ -830,12 +830,11 @@ class MuZeroTrain():
     @chex.dataclass(frozen=True)
     class SampleTrajectoryCarry:
       game_state: GameState
-      key: chex.Array
       terminal: chex.Array
       legal_actions: chex.Array
     
-    vectorized_init = jax.vmap(self.game.initialize_structures, in_axes=(0), out_axes=(0, 0, 0))     
-    game_state, game_keys, legal_actions = vectorized_init(game_keys)
+    vectorized_init = jax.vmap(self.game.initialize_structures, in_axes=(0), out_axes=(0, 0))     
+    game_state, legal_actions = vectorized_init(game_keys)
     
     @jax.jit
     def choice_wrapper(key, p):
@@ -844,13 +843,13 @@ class MuZeroTrain():
       return action, action_oh
     
     vectorized_get_info = jax.vmap(self.game.get_info, in_axes=(0), out_axes=(0, 0, 0, 0))
-    vectorized_apply_action = jax.vmap(self.game.apply_action, in_axes=(0, 0, None, 0), out_axes=(0, 0, 0, 0, 0))
+    vectorized_apply_action = jax.vmap(self.game.apply_action, in_axes=(0, 0, None, 0), out_axes=(0, 0, 0, 0))
+    # first is for players, second for batch
     vectorized_sample_action = jax.vmap(jax.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0), in_axes=(0, 0), out_axes=0)
     network_apply = jax.vmap(self._jit_get_policy, in_axes=(None, 1, 1), out_axes=1)
     
     init_carry = SampleTrajectoryCarry(
       game_state = game_state,
-      key = game_keys,
       terminal= jnp.zeros((self.config.batch_size), dtype=bool),
       legal_actions = legal_actions
     )
@@ -863,11 +862,15 @@ class MuZeroTrain():
       random_pi = carry.legal_actions / jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
       pi = self.config.sampling_epsilon * random_pi + (1 - self.config.sampling_epsilon) * pi
       # pi = carry.legal_actions / jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
-      action, action_oh = vectorized_sample_action(key, pi)
-      next_game_state, next_key, terminal, next_rewards, next_legal = vectorized_apply_action(carry.game_state, carry.key, turn, action)
+      
+      sample_key, action_key = jax.random.split(key)
+      sample_key = jax.random.split(sample_key, (self.config.batch_size, 2))
+      action_key = jax.random.split(action_key, self.config.batch_size)
+      
+      action, action_oh = vectorized_sample_action(sample_key, pi)
+      next_game_state, terminal, next_rewards, next_legal = vectorized_apply_action(carry.game_state, action_key, turn, action)
       new_carry = SampleTrajectoryCarry(
         game_state = next_game_state,
-        key = next_key,
         terminal = terminal,
         legal_actions=next_legal
       )
@@ -2053,12 +2056,16 @@ class MuZeroTrain():
         for a2 in state.legal_actions(1):
           new_state = state.clone()
           new_state.apply_actions([a1, a2])
-          new_game_state, new_key, terminal, new_rewards, new_legals = self.game.apply_action(game_state, key, turn, np.array([a1, a2]))
-          _traverse_tree(new_state, new_game_state, new_key, new_legals, turn + 1)
+          key, subkey = jax.random.split(key)
+          new_game_state, terminal, new_rewards, new_legals = self.game.apply_action(game_state, subkey, turn, np.array([a1, a2]))
+          _traverse_tree(new_state, key, new_game_state, new_legals, turn + 1)
 
     key = jax.random.key(self.config.seed)    
-    init_state, key, current_legals = self.game.initialize_structures(key)
-    _traverse_tree(game.new_initial_state(), init_state, key, current_legals)
+    key, init_subkey, traverse_subkey = jax.random.split(key, 3)
+    
+    init_state, current_legals = self.game.initialize_structures(init_subkey)
+    
+    _traverse_tree(game.new_initial_state(), init_state, traverse_subkey, current_legals)
     isets = np.array(isets, dtype=np.float32)
     legals = np.array(legals, dtype=np.int8)
     pi = self._jit_get_policy(self.network_parameters.rnad_params_target, isets, legals)
@@ -2206,7 +2213,7 @@ def jax_compare_learned_trees(muzero, jax_game, orig_game):
   
   
 from open_spiel.python.algorithms.best_response import BestResponsePolicy
-from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxOriginalGoofspiel
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxGoofspiel
 
 def main():
   cards = 3
@@ -2218,7 +2225,7 @@ def main():
   
   orig_game =  pyspiel.load_game("goofspiel", params)
   
-  game = JaxOriginalGoofspiel(cards, points_order)
+  game = JaxGoofspiel(cards, points_order)
   
   # game = orig_game 
   mu = True

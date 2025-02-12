@@ -3,7 +3,7 @@ import argparse
 import chex
 import jax
 import jax.numpy as jnp
-from jax_goofspiel import JaxOriginalGoofspiel, GoofspielGameState
+from jax_goofspiel import JaxGoofspiel, GoofspielGameState
 from game_test_utils import extract_from_spiel ,histogram, compare_hists
 from collections import deque
 
@@ -24,7 +24,7 @@ class SampleTrajectoryCarry:
 #Extract from jax goofspiel how
 #many states fall under each infoset/public state
 def extract_from_jax_goofspiel(cards, points_order):
-  game = JaxOriginalGoofspiel(cards=cards, points_order=points_order)
+  game = JaxGoofspiel(cards=cards, points_order=points_order)
   #state_tensors = []
   count_states_by_isets = [{} for _ in range(2)]
   count_states_by_public_state = {}

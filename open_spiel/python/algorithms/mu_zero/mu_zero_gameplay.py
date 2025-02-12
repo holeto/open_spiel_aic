@@ -7,7 +7,7 @@ import chex
 import numpy as np
 import queue
 
-from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxOriginalGoofspiel
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxGoofspiel
 from open_spiel.python.algorithms.mu_zero.mu_zero_train import MuZeroTrain
 from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFRConstants, MuZeroCFR, check_iset_similarity
 
@@ -240,9 +240,9 @@ class MuZeroGameplay:
     
   # First finds the information states and public states from the game, then pushes them through abstraction layer
   def initialize_isets(self):
-    if isinstance(self.muzero.game, JaxOriginalGoofspiel):
+    if isinstance(self.muzero.game, JaxGoofspiel):
       key = jax.random.key(0)
-      game_state, key, legals = self.muzero.game.initialize_structures(key) 
+      game_state, legals = self.muzero.game.initialize_structures(key) 
       _, *self.init_info = self.muzero.game.get_info(game_state) 
     else:
       state = self.muzero.game.new_initial_state()

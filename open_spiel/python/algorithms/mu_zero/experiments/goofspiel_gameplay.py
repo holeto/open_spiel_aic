@@ -7,7 +7,7 @@ import jax
 from copy import copy
 from pyinstrument import Profiler
 
-from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxOriginalGoofspiel
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxGoofspiel
 from open_spiel.python.algorithms.mu_zero.experiments.utils import load_model
 from open_spiel.python.algorithms.mu_zero.mu_zero import MuZeroTrain
 from open_spiel.python.algorithms.mu_zero.mu_zero_gameplay import MuZeroGameplay, MuZeroGameplayConfig
@@ -16,7 +16,7 @@ from open_spiel.python.algorithms.mu_zero.mu_zero_gameplay import MuZeroGameplay
 parser = argparse.ArgumentParser()
 
 # Training setting
-parser.add_argument("--model_path", type=str, default="muzero_networks/goofspiel_3_descending/seed_42/muzero_99.pkl", help="Model path") 
+parser.add_argument("--model_path", type=str, default="muzero_networks/goofspiel_5_descending/seed_482/muzero_2.pkl", help="Model path") 
 parser.add_argument("--depth_limit", type=int, default=1, help="Depth limit for exploitability calculation in each infoset")
 parser.add_argument("--resolve_iterations", type=int, default=1000, help="Number of CFR iterations")
 
@@ -24,7 +24,7 @@ parser.add_argument("--resolve_iterations", type=int, default=1000, help="Number
 parser.add_argument("--player", type=int, default=0, help="Resolving player")
 parser.add_argument("--rounds", type=int, default=10, help="Number of rounds to play until the end.")
 parser.add_argument("--opponent", type=str, default="random", help="Opponent strategy")
-parser.add_argument("--verbose", type=bool, default=False, help="Print played actions.")
+parser.add_argument("--verbose", type=bool, default=True, help="Print played actions.")
 
 
 
@@ -44,8 +44,9 @@ def get_opponent_action(opponent:str, opp_iset, opp_legals, actions, model:MuZer
   return np.random.choice(actions, p=pi)
 
 def play_single_round(args, model:MuZeroTrain, gameplay: MuZeroGameplay,parallel:bool = True):
-  init_key = jax.random.key(0)
-  game_state, key, legals = model.game.initialize_structures(init_key)
+  key = jax.random.key(0)
+  key, init_key = jax.random.split(key)
+  game_state, legals = model.game.initialize_structures(init_key)
   opp = 1 - args.player
   opp_legals = legals[opp]
   
@@ -70,7 +71,8 @@ def play_single_round(args, model:MuZeroTrain, gameplay: MuZeroGameplay,parallel
     if args.verbose:
       print("Applying action: ", actions)
     actions = jnp.stack(actions, axis=0)
-    game_state, key, terminal, rewards, legals = model.game.apply_action(game_state, key, turn, actions)
+    key, action_key = jax.random.split(key)
+    game_state, terminal, rewards, legals = model.game.apply_action(game_state, action_key, turn, actions)
     cumulative_reward += rewards
     opp_legals = legals[opp]
     turn += 1
@@ -110,7 +112,7 @@ def parallel_experiment(args, model, muzero_gameplay, njobs=8):
 def main(): 
   args = parser.parse_args()
   model = load_model(args.model_path) 
-  assert isinstance(model.game, JaxOriginalGoofspiel)
+  assert isinstance(model.game, JaxGoofspiel)
   assert model.game.points_order == "descending", "We cannot handle gameplay of different Goofspiels"
   gp_config =MuZeroGameplayConfig(player=args.player)
   muzero_gameplay = MuZeroGameplay(model, gp_config)

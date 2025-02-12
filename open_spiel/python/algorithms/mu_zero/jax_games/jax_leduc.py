@@ -85,14 +85,13 @@ class JaxLeduc(JaxGame):
     public_card = jnp.zeros(1, dtype=int)
     turns_this_round = jnp.zeros(1, dtype=int)
     chosen_cards = jax.random.choice(key, private_cards, axis=0)
-    key = jax.random.split(key, 1)[0]
     legals = jnp.stack([p1_legal_mask, p2_legal_mask], axis=0)
     game_state = LeducGameState(action_history=action_history,
                             public_card = public_card,
                             private_cards=chosen_cards,
                             current_chips = current_chips,
                             turns_this_round = turns_this_round)
-    return game_state, key, legals
+    return game_state, legals
   
   @functools.partial(jax.jit, static_argnums=(0))
   def get_info(self, game_state:LeducGameState):
@@ -172,8 +171,7 @@ class JaxLeduc(JaxGame):
   
     #The division by self.max_bet_amount to make sure the rewards is normalized to [-1, 1] range
     reward = jnp.where(terminal, jnp.where(jnp.logical_and(tie, ~folded), 0, ((1 - 2 * winner) * current_chips[1-winner]) / self.max_bet_amount), 0)
-    
-    key = jax.random.split(key, 1)[0]
+  
 
     new_game_state = LeducGameState(action_history=action_history,
                            public_card = public_card,
@@ -181,4 +179,4 @@ class JaxLeduc(JaxGame):
                            current_chips = current_chips,
                            turns_this_round = turns_this_round + 1)
 
-    return new_game_state, key, jnp.squeeze(terminal), reward[0], new_legals
+    return new_game_state, jnp.squeeze(terminal), reward[0], new_legals

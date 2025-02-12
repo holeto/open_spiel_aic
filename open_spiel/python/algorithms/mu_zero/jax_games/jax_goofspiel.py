@@ -13,7 +13,7 @@ class GoofspielGameState(GameState):
     p1_points: chex.Array
 
 
-class JaxOriginalGoofspiel(JaxGame):
+class JaxGoofspiel(JaxGame):
   def __init__(self, cards, points_order="descending", turns=-1) -> None:
     self.cards = cards
     self.max_turns = cards - 1
@@ -42,7 +42,7 @@ class JaxOriginalGoofspiel(JaxGame):
     played_cards = jnp.zeros((2, self.max_turns, self.cards))
     p1_points = jnp.zeros(self.max_turns)
     game_state= GoofspielGameState(point_cards=point_cards, played_cards=played_cards, p1_points=p1_points)
-    return game_state, key, jnp.ones((2, self.cards))
+    return game_state, jnp.ones((2, self.cards))
   
   @functools.partial(jax.jit, static_argnums=(0, 1))
   def initialize_batch_structures(self, batch):
@@ -124,11 +124,11 @@ class JaxOriginalGoofspiel(JaxGame):
     game_state= GoofspielGameState(point_cards=game_state.point_cards, played_cards=played_cards, p1_points=p1_points)
 
     
-    return game_state, key, terminal, rewards, legal_actions
+    return game_state, terminal, rewards, legal_actions
     
 
 
-class JaxGoofspiel():
+class JaxModifiedGoofspiel(JaxGoofspiel):
   def __init__(self, cards, turns, first_card) -> None:
     
     self.cards = cards
@@ -187,7 +187,7 @@ class JaxGoofspiel():
 def main():
   cards = 5
   batch = 32
-  goof = JaxOriginalGoofspiel(cards)
+  goof = JaxGoofspiel(cards)
   info, legal_actions = goof.initialize_batch_structures(batch)
   
   apply_action = jax.vmap(goof.apply_action, in_axes=(0, 0, 0, None, 0), out_axes=(0, 0, 0))
