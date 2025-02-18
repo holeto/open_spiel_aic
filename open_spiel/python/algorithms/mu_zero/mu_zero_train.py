@@ -1319,7 +1319,7 @@ class MuZeroTrain():
     vectorized_legal_actions = jax.vmap(self.legal_actions_network.apply, in_axes=(None, 0), out_axes=0)
     legal_actions = vectorized_legal_actions(legal_actions_params, obs)
     
-    loss = optax.losses.sigmoid_focal_loss(legal_actions, legal)
+    loss = optax.losses.sigmoid_binary_cross_entropy(legal_actions, legal)
     loss = jnp.sum(loss) / jnp.sum(valid)
     # loss = jnp.sum((legal - legal_actions) ** 2) / jnp.sum(valid)
     return loss
