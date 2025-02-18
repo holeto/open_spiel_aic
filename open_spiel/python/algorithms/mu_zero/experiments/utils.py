@@ -41,5 +41,6 @@ def get_tabular_from_string(policy: dict, orig_game: pyspiel.Game, jax_game: Jax
         _traverse_tree(new_state, new_game_state, next_key, depth +1)
   #using seed 0 here, as this is not a game with chance nodes it can be arbitrary
   start_key = jax.random.key(0)
-  _traverse_tree(orig_game.new_initial_state(), *jax_game.initialize_structures(start_key)[:-1])
+  start_key, action_key = jax.random.split(start_key)
+  _traverse_tree(orig_game.new_initial_state(), *jax_game.initialize_structures(start_key)[:-1], action_key)
   return tab_policy    
