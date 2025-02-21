@@ -361,19 +361,19 @@ def normalize_direction_with_mask(x:chex.Array, mask:chex.Array) -> chex.Array:
   norm = jnp.linalg.norm(x, 2, -1, keepdims=True)
   return jnp.where(norm < 1e-15, x, x / norm)
 
-# TODO: This should take valid into account
-def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: chex.Array, temperature: float=1.0):
+def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: chex.Array, valid: chex.Array, temperature: float=1.0):
   # The predicted dimension is missing
   chex.assert_shape((real,), (*pred.shape[:-2], pred.shape[-1]))
   cluster_difference = lax.stop_gradient(jnp.expand_dims(real, -2)) - pred
   cluster_distance = jnp.linalg.norm(cluster_difference, axis=-1)
   cluster_soft_assignement = jax.nn.softmax(-cluster_distance * temperature, axis=-1)
+  cluster_soft_assignement = normalize_direction_with_mask(cluster_soft_assignement, valid)
   cluster_loss = jnp.sum(cluster_difference ** 2, axis=-1)
   cluster_loss = jnp.sum(cluster_loss * cluster_soft_assignement, axis=-1)
   return jnp.mean(cluster_loss), cluster_soft_assignement
   
-def _compute_soft_kmeans_loss_with_single(real, pred, probs):
-  cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred, 1.0)
+def _compute_soft_kmeans_loss_with_single(real, pred, probs, valid):
+  cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred, valid, 1.0)
   prob_loss = optax.losses.softmax_cross_entropy(probs,  jax.lax.stop_gradient(cluster_soft_assignement))
   # labels = jnp.argmax(cluster_soft_assignement, axis=-1)
   # smoothed_labels = jax.nn.one_hot(jnp.argmax(probs, axis=-1), probs.shape[-1])
@@ -583,6 +583,7 @@ class MuZeroTrain():
     )
     # return ts
     return jax.tree_util.tree_map(lambda xs: np.expand_dims(xs, 0), ts)
+
     
 
   @functools.partial(jax.jit, static_argnums=(0,))
@@ -887,20 +888,25 @@ class MuZeroTrain():
       
       action, action_oh = vectorized_sample_action(sample_key, pi)
       next_game_state, terminal, next_rewards, next_legal = vectorized_apply_action(carry.game_state, action_key, turn, action)
+      valid = jnp.ones_like(next_rewards) - carry.terminal
+      #TODO: This can likely be done better, couldnt get tree_where to work
+      next_legal = jnp.where(valid[..., None, None], next_legal, self.example_timestep.legal)
+      next_rewards = jnp.where(valid, next_rewards, 0)
+      public_state = jnp.where(valid[..., None], public_state, self.example_timestep.public_state)
+      obs = jnp.where(valid[..., None, None], obs, self.example_timestep.obs)
       new_carry = SampleTrajectoryCarry(
         game_state = next_game_state,
         terminal = terminal,
         legal_actions=next_legal
       )
       timestep = TimeStep(
-        valid = jnp.ones_like(next_rewards) - carry.terminal,
+        valid = valid,
         public_state = public_state,
         obs = obs,
         legal = carry.legal_actions,
         action = action_oh,
         policy = pi,
         reward = next_rewards
-        
       )
       return new_carry, timestep
     _, timestep = lax.scan(_sample_trajectory,
@@ -1049,7 +1055,7 @@ class MuZeroTrain():
     
     
     # We do not take into account the player reaches, since infoset is always reached with the same prob
-    sampling_policy = jnp.prod(sampling_policy, axis=-2, keepdims=True) 
+    sampling_policy = jnp.prod(sampling_policy, axis=-2, keepdims=True)
     
     # # TODO: what about invalid turns?
     importance_sampling = network_policy / sampling_policy
@@ -1115,12 +1121,13 @@ class MuZeroTrain():
     
     predicted_direction = normalize_direction_with_mask(predicted_direction, mask[..., jnp.newaxis, :])
     update_direction = normalize_direction_with_mask(update_direction, mask)
-    
+
     # TODO: This makes the whole trajectory into a single policy vector. Shall we do it this way? Maybe compare it with the old implementation
     predicted_direction = transform_trajectory_to_last_dimension(predicted_direction)
     update_direction = transform_trajectory_to_last_dimension(update_direction)
+    valid_clusters = jnp.ones(predicted_direction.shape[:-1])
     
-    loss, _ = _compute_soft_kmeans_loss_with_cluster_assignments(update_direction, predicted_direction)
+    loss, _ = _compute_soft_kmeans_loss_with_cluster_assignments(update_direction, predicted_direction, valid_clusters)
     return loss
   
   def state_v_trace(
@@ -1262,7 +1269,8 @@ class MuZeroTrain():
                        similarity_params: Params, 
                        similarity_target: chex.Array,
                        public_state: chex.Array,
-                       obs: chex.Array): 
+                       obs: chex.Array,
+                       valid: chex.Array): 
     
     vectorized_abstraction = jax.vmap(self.abstraction_network.apply, in_axes=(None, 0), out_axes=0)
     vectorized_ps_decoder = jax.vmap(jax.vmap(self.ps_decoder.apply, in_axes=(None, 0), out_axes=0), in_axes=(None, -2), out_axes=-2)
@@ -1270,18 +1278,17 @@ class MuZeroTrain():
     vectorized_similarity = jax.vmap(jax.vmap(self.similarity_network.apply, in_axes=(None, 0), out_axes=0), in_axes=(None, -2), out_axes=-2)
     
     
-    
-    
+
     abstraction = vectorized_abstraction(abstraction_params, public_state)
     decoded_ps = vectorized_ps_decoder(ps_decoder_params, abstraction)
-    iset_probs = vectorized_iset_encoder(iset_encoder_params, obs)
-    similarity = vectorized_similarity(similarity_params, abstraction) 
+    iset_probs = vectorized_iset_encoder(iset_encoder_params, obs) * valid[..., None]
+    similarity = vectorized_similarity(similarity_params, abstraction) * valid[..., None, None]
     
-    ps_loss = jnp.expand_dims(public_state, -2) - decoded_ps
+    ps_loss = (jnp.expand_dims(public_state, -2) - decoded_ps) * valid[..., None, None]
     ps_loss = jnp.mean(ps_loss ** 2)
     
     # This computes the kmeans loss and the iset loss. TODO: Add the weighted term to the pi/v distance 
-    return _compute_soft_kmeans_loss_with_single(similarity_target, similarity, iset_probs) + ps_loss
+    return _compute_soft_kmeans_loss_with_single(similarity_target, similarity, iset_probs, valid[..., None]) + ps_loss
     
   def non_abstracted_legal_actions_loss(self,
                                         legal_actions_params: Params,
@@ -1430,7 +1437,8 @@ class MuZeroTrain():
         similarity_params[pl], 
         jax.lax.stop_gradient(similarity[..., pl, :]), 
         timestep.public_state, 
-        timestep.obs[..., pl, :])
+        timestep.obs[..., pl, :],
+        timestep.valid)
        
       
       abs_grad.append(abstraction_grad)
@@ -1811,7 +1819,7 @@ class MuZeroTrain():
     
     opponent_is = jnp.flip(importance_sampling, axis=-2)
     
-    weighted_regularization_term = -eta * regularization_term 
+    weighted_regularization_term = -eta * regularization_term
     regularization_entropy = eta * jnp.sum(network_policy * regularization_term, axis=-1)
     
     both_player_entropy = regularization_entropy[..., 1] - regularization_entropy[..., 0]
@@ -1885,7 +1893,6 @@ class MuZeroTrain():
       rho=self.config.rho_iset_vtrace, 
       eta=self.config.eta_regularization
     )
-     
     v_loss = 0.0
     # We multiply by 2, since each player acts
     normalization = jnp.sum(timestep.valid) * 2 
@@ -1894,8 +1901,8 @@ class MuZeroTrain():
     importance_sampling = jnp.ones_like(q_value)
     
     loss_neurd = neurd_loss(logit, pi, q_value, timestep.legal, importance_sampling)
-    
     neurd_loss_value = -jnp.sum(loss_neurd * expanded_valid) / (normalization + (normalization == 0))
+    
     return v_loss + neurd_loss_value
     
     
@@ -2076,7 +2083,7 @@ class MuZeroTrain():
           new_state.apply_actions([a1, a2])
           key, subkey = jax.random.split(key)
           new_game_state, terminal, new_rewards, new_legals = self.game.apply_action(game_state, subkey, turn, np.array([a1, a2]))
-          _traverse_tree(new_state, key, new_game_state, new_legals, turn + 1)
+          _traverse_tree(new_state, new_game_state, key, new_legals, turn + 1)
 
     key = jax.random.key(self.config.seed)    
     key, init_subkey, traverse_subkey = jax.random.split(key, 3)
@@ -2156,7 +2163,8 @@ def compare_legals(muzero, game):
       for a2_i, a2 in enumerate(current_legals[1]):
         if a2 <= 0.5:
           continue 
-        new_game_state, new_key, new_terminal, new_rewards, new_legals = game.apply_action(game_state, key, turn, np.array([a1_i, a2_i]))
+        new_game_state, new_terminal, new_rewards, new_legals = game.apply_action(game_state, key, turn, np.array([a1_i, a2_i]))
+        new_key = jax.random.split(key)[0]
         _traverse_tree(new_game_state, new_key, new_legals, new_terminal, turn + 1)
   
   
@@ -2234,7 +2242,7 @@ from open_spiel.python.algorithms.best_response import BestResponsePolicy
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxGoofspiel
 
 def main():
-  cards = 3
+  cards = 5
   points_order = "descending"
   
   # params = {"num_cards": 5, "num_turns": 3, "first_round": 0}
@@ -2248,7 +2256,7 @@ def main():
   # game = orig_game 
   mu = True
   if mu == True:
-    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=False, sampling_epsilon=0.0, entropy_schedule_size=(3000,)))
+    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=32, trajectory_max=cards -1, use_abstraction=False, sampling_epsilon=0.0, entropy_schedule_size=(3000,)))
     # muzero.rng_key = jax.random.PRNGKey(42)
   else:
     params = [(n, p) for n, p in params.items()]
@@ -2257,9 +2265,10 @@ def main():
   
   # profiler = Profiler()
   # profiler.start()
-  with chex.fake_jit():
-    for _ in range(1):
-      muzero.jax_step()
+  #with chex.fake_jit():
+  for it in range(1000):
+    #muzero.step()
+    muzero.jax_step()
   print("Trained")
      
   # goofspiel_compare_learned_trees(muzero, game, orig_game)
@@ -2268,9 +2277,10 @@ def main():
   # profiler.stop()
   # print(profiler.output_text(color=True, unicode=True))
   
-  # policy = muzero.extract_full_policy()
+  #policy = muzero.extract_full_policy()
      
   policy = muzero.extract_jax_policy(orig_game)
+  #print(policy.to_dict())
   
   # print(policy.action_probabilities(state, 0))
   # print(policy.action_probabilities(state, 1))
