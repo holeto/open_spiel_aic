@@ -1,6 +1,6 @@
 
 from open_spiel.python.algorithms.rnad.rnad import _legal_policy, legal_log_policy, EntropySchedule
-from open_spiel.python.algorithms.mu_zero.flax_utils import init_network_with_optimizer, init_params_optimizer, optax_optimizer
+from open_spiel.python.algorithms.mu_zero.flax_utils import init_network_with_optimizer, init_params_optimizer, optax_optimizer, masked_l2_loss, masked_l2_loss_with_normalization
 
 from open_spiel.python.algorithms.rnad.rnad import RNaDSolver, RNaDConfig
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame, GameState
@@ -112,7 +112,26 @@ class DynamicsNetwork(nn.Module):
     is_terminal = nn.Dense(1)(x)
     
     return next_p1_iset, next_p2_iset, reward, is_terminal
- 
+
+class PublicStateDynamicsNetwork(nn.Module):
+  hidden_size: int
+  public_state_size: int
+  abstraction_amount: int
+  
+  @nn.compact
+  def __call__(self, p1_isets, p2_isets, p1_action, p2_action):
+    x = jnp.concatenate((p1_isets, p2_isets, p1_action, p2_action), axis=-1)
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    x = nn.Dense(self.hidden_size)(x)
+    x = nn.relu(x)
+    public_state = nn.Dense(self.public_state_size)(x)
+    p1_dist = nn.Dense(self.abstraction_amount)(x)
+    p2_dist = nn.Dense(self.abstraction_amount)(x)
+    reward = nn.Dense(2)(x)
+    is_terminal = nn.Dense(1)(x)
+    return public_state, p1_dist, p2_dist, reward, is_terminal
+
 class InfosetEncoder(nn.Module):
   hidden_size: int
   isets: int
@@ -229,7 +248,7 @@ class ExpectedNetwork(nn.Module):
     x = nn.Dense(1)(x)
     return x
  
-class RNaDNework(nn.Module):
+class RNaDNetwork(nn.Module):
   hidden_size: int
   out_dims: int
   
@@ -254,6 +273,10 @@ class SimilarityMetric(str, Enum):
   POLICY_VALUE = "policy_value"
   LEGAL_ACTIONS = "legal_actions"
  
+ 
+class DynamicsType(str, Enum):
+  ISET = "iset"
+  PUBLIC_STATE = "public_state"
 @chex.dataclass(frozen=True)
 class MuZeroTrainConfig: 
   
@@ -273,6 +296,8 @@ class MuZeroTrainConfig:
   abstraction_amount: int = 10
   abstraction_size: int = 32
   similarity_metric: SimilarityMetric = SimilarityMetric.POLICY_VALUE
+  
+  dynamics_type: DynamicsType = DynamicsType.PUBLIC_STATE
   
   ps_encoder_hidden_size: int = 128
   ps_decoder_hidden_size: int = 64
@@ -361,20 +386,42 @@ def normalize_direction_with_mask(x:chex.Array, mask:chex.Array) -> chex.Array:
   norm = jnp.linalg.norm(x, 2, -1, keepdims=True)
   return jnp.where(norm < 1e-15, x, x / norm)
 
+
+
+def compute_soft_assignments(cluster_distance, cluster_assignment: float=0.3):
+  '''Computes a soft-assignments to soft k-means (fuzzy c-means). This is not the original method. When more than 1 point is too close to the center, we only move the closest one.'''
+  closest = jnp.min(cluster_distance, -1, keepdims=True)
+  nulled_clusters = jnp.where(jnp.logical_and(cluster_distance < cluster_assignment, cluster_distance > closest + 1e-10), 0, 1)
+  soft_assignments = jax.nn.softmax(-cluster_distance, axis=-1)
+  soft_assignments = jnp.where(jnp.logical_and(cluster_distance < cluster_assignment, cluster_distance > closest + 1e-10), -soft_assignments, soft_assignments)
+  # soft_assignment = _legal_policy(-cluster_distance, nulled_clusters)
+  return soft_assignments
+
+
 # TODO: This should take valid into account
 def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: chex.Array, temperature: float=1.0):
   # The predicted dimension is missing
   chex.assert_shape((real,), (*pred.shape[:-2], pred.shape[-1]))
   cluster_difference = lax.stop_gradient(jnp.expand_dims(real, -2)) - pred
   cluster_distance = jnp.linalg.norm(cluster_difference, axis=-1)
-  cluster_soft_assignement = jax.nn.softmax(-cluster_distance * temperature, axis=-1)
-  cluster_loss = jnp.sum(cluster_difference ** 2, axis=-1)
+  
+  cluster_soft_assignement = compute_soft_assignments(cluster_distance * temperature)
+   
+  
+  # cluster_soft_assignement = jax.nn.softmax(-cluster_distance * temperature, axis=-1)
+  
+  cluster_loss = jnp.mean(cluster_difference ** 2, axis=-1)
   cluster_loss = jnp.sum(cluster_loss * cluster_soft_assignement, axis=-1)
   return jnp.mean(cluster_loss), cluster_soft_assignement
   
 def _compute_soft_kmeans_loss_with_single(real, pred, probs):
-  cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred, 1.0)
-  prob_loss = optax.losses.softmax_cross_entropy(probs,  jax.lax.stop_gradient(cluster_soft_assignement))
+  cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred) 
+  
+  # cluster_soft_assignement = jnp.maximum(cluster_soft_assignement, 0.0)
+  
+  cluster_soft_assignement = jnp.where(cluster_soft_assignement >= jnp.max(cluster_soft_assignement, -1, keepdims=True), 1, 0)
+  
+  prob_loss = optax.losses.softmax_cross_entropy(probs, jax.lax.stop_gradient(cluster_soft_assignement))
   # labels = jnp.argmax(cluster_soft_assignement, axis=-1)
   # smoothed_labels = jax.nn.one_hot(jnp.argmax(probs, axis=-1), probs.shape[-1])
   # smoothed_labels = optax.smooth_labels(smoothed_labels, 0.1)
@@ -414,14 +461,19 @@ class MuZeroTrain():
         repeats=self.config.entropy_schedule_repeats)
     
     self.expected_network = ExpectedNetwork(self.config.rnad_hidden_size)
-    self.rnad_network = RNaDNework(self.config.rnad_hidden_size, self.actions)
+    self.rnad_network = RNaDNetwork(self.config.rnad_hidden_size, self.actions)
     self.abstraction_network = PublicStateEncoder(self.config.ps_encoder_hidden_size, self.config.abstraction_size, self.config.abstraction_amount)
     self.ps_decoder = PublicStateDecoder(self.config.ps_decoder_hidden_size, self.game.public_state_tensor_shape())
     self.iset_encoder = InfosetEncoder(self.config.iset_hidden_size, self.config.abstraction_amount)
     self.similarity_network = SimilarityNetwork(self.config.similarity_hidden_size, self.similarity_output_size())
     self.legal_actions_network = LegalActionsNetwork(self.config.legal_actions_hidden_size, self.actions)
-    self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.obs)
     
+    if self.config.dynamics_type == DynamicsType.ISET:
+      self.dynamics_network = DynamicsNetwork(self.config.dynamics_hidden_size, self.obs)
+    elif self.config.dynamics_type == DynamicsType.PUBLIC_STATE:
+      assert self.config.use_abstraction == True, "Dynamics for Public state work only with abstrations."
+      self.dynamics_network = PublicStateDynamicsNetwork(self.config.dynamics_hidden_size, self.game.public_state_tensor_shape(), self.config.abstraction_amount)
+      
     self.transformation_network = TransformationNetwork(self.config.transformation_hidden_size, self.config.transformations, self.actions)
     self.mvs_network = MAVSNetwork(self.config.mvs_hidden_size, self.config.transformations + 1)
     
@@ -432,11 +484,17 @@ class MuZeroTrain():
     self._rnad_with_expected_loss = jax.value_and_grad(self.rnad_with_expected_loss, has_aux=False)
     
     if self.config.use_abstraction:
-      self._dynamics_loss = jax.value_and_grad(self.abstracted_dynamics_loss, has_aux=False)
+      
+      if self.config.dynamics_type == DynamicsType.ISET:
+        self._dynamics_loss = jax.value_and_grad(self.abstracted_dynamics_loss, has_aux=False)
+      elif self.config.dynamics_type == DynamicsType.PUBLIC_STATE:
+        self._dynamics_loss = jax.value_and_grad(self.abstracted_ps_dynamics_loss, has_aux=False)
+        
+      
       self._transformation_loss = jax.value_and_grad(self.abstracted_transformation_loss, has_aux=False)
       self._mvs_loss = jax.value_and_grad(self.abstracted_mvs_loss, has_aux=False)
       self._legal_actions_loss = jax.value_and_grad(self.abstracted_legal_actions_loss, has_aux=False)
-    else: 
+    else:  
       self._dynamics_loss = jax.value_and_grad(self.non_abstracted_dynamics_loss, has_aux=False)
       self._transformation_loss = jax.value_and_grad(self.non_abstracted_transformation_loss, has_aux=False)
       self._mvs_loss = jax.value_and_grad(self.non_abstracted_mvs_loss, has_aux=False)
@@ -476,7 +534,7 @@ class MuZeroTrain():
     
     # self.dynamics_params = self.dynamics_network.init(temp_keys[6], self.example_timestep.obs, self.example_timestep.obs, self.example_timestep.action, self.example_timestep.action)
     dynamics_params = self.dynamics_network.init(temp_keys[11], self.example_obs, self.example_obs, self.example_timestep.action, self.example_timestep.action)
-    
+
     mvs_params = self.mvs_network.init(temp_keys[12], self.example_obs, self.example_obs)
     mvs_params_target = self.mvs_network.init(temp_keys[12], self.example_obs, self.example_obs)
     
@@ -489,6 +547,7 @@ class MuZeroTrain():
     
     p1_abstraction_optimizer = optax_optimizer(p1_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_abstraction_optimizer = optax_optimizer(p2_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+
     p1_iset_encoder_optimizer = optax_optimizer(p1_iset_encoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_iset_encoder_optimizer = optax_optimizer(p2_iset_encoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     
@@ -625,6 +684,18 @@ class MuZeroTrain():
     return self.dynamics_network.apply(params, p1_iset, p2_iset, p1_action, p2_action)
   
   @functools.partial(jax.jit, static_argnums=(0,))
+  def _jit_get_next_state_ps(self, dynamics_params, p1_abstraction_params, p2_abstraction_params, p1_iset, p2_iset, p1_action, p2_action):
+    next_ps, next_p1_dist, next_p2_dist, reward, terminal = self._jit_get_next_state(dynamics_params, p1_iset, p2_iset, p1_action, p2_action)
+    next_ps = jnp.where(next_ps > 0.5, 1, 0)
+    
+    next_p1_isets = self._jit_get_all_abstractions(p1_abstraction_params, next_ps)
+    next_p2_isets = self._jit_get_all_abstractions(p2_abstraction_params, next_ps)
+    next_p1_iset = jnp.argmax(next_p1_dist, axis=-1, keepdims=True)
+    next_p2_iset = jnp.argmax(next_p2_dist, axis=-1, keepdims=True)
+    return jnp.squeeze(jnp.take_along_axis(next_p1_isets, next_p1_iset[..., jnp.newaxis], axis=-2), -2), jnp.squeeze(jnp.take_along_axis(next_p2_isets, next_p2_iset[..., jnp.newaxis], axis=-2), -2), reward, terminal
+    
+  
+  @functools.partial(jax.jit, static_argnums=(0,))
   def _jit_get_all_abstractions(self, abstraction_params, public_state):
     return self.abstraction_network.apply(abstraction_params, public_state)
     
@@ -641,7 +712,14 @@ class MuZeroTrain():
     abstraction = self.abstraction_network.apply(abstraction_params, public_state)
     iset = self.iset_encoder.apply(iset_params, obs)
     picked_iset = jnp.argmax(iset, axis=-1, keepdims=True)
-    return jnp.squeeze(jnp.take_along_axis(abstraction, picked_iset[..., jnp.newaxis], axis=-2))
+    return jnp.squeeze(jnp.take_along_axis(abstraction, picked_iset[..., jnp.newaxis], axis=-2), -2)
+  
+  @functools.partial(jax.jit, static_argnums=(0,))
+  def _jit_get_abstraction_with_iset_id(self,abstraction_params,  iset_params, public_state, obs):
+    abstraction = self.abstraction_network.apply(abstraction_params, public_state)
+    iset = self.iset_encoder.apply(iset_params, obs)
+    picked_iset = jnp.argmax(iset, axis=-1, keepdims=True)
+    return picked_iset, jnp.squeeze(jnp.take_along_axis(abstraction, picked_iset[..., jnp.newaxis], axis=-2), -2)
   
   @functools.partial(jax.jit, static_argnums=(0, ))
   def _jit_get_mvs(self, mvs_params, p1_iset, p2_iset):
@@ -666,19 +744,19 @@ class MuZeroTrain():
 
   def get_decoded_public_state(self, obs, pl):
     return self._jit_get_decoded_public_state(self.network_parameters.ps_decoder_params[pl], obs)
-
-  def get_non_abstracted_next_state(self, public_state, p1_iset, p2_iset, p1_action, p2_action):
-    return self._jit_get_next_state(self.network_parameters.dynamics_params, p1_iset, p2_iset, p1_action, p2_action)
   
   def get_next_state_from_abstraction(self, p1_iset, p2_iset, p1_action, p2_action):
-    return self._jit_get_next_state(self.network_parameters.dynamics_params, p1_iset, p2_iset, p1_action, p2_action) 
-    
+    if self.config.dynamics_type == DynamicsType.ISET:
+      return self._jit_get_next_state(self.network_parameters.dynamics_params, p1_iset, p2_iset, p1_action, p2_action)
+    elif self.config.dynamics_type == DynamicsType.PUBLIC_STATE:
+      return self._jit_get_next_state_ps(self.network_parameters.dynamics_params, self.network_parameters.abstraction_params[0], self.network_parameters.abstraction_params[1], p1_iset, p2_iset, p1_action, p2_action)
+    assert False, "Wrong dynamics type"
   
   # Expects isets in the original game definition and action as a index of the action
   def get_next_state(self, public_state, p1_iset, p2_iset, p1_action, p2_action):
     if self.config.use_abstraction:
       p1_iset, p2_iset = self.get_both_abstraction(public_state, p1_iset, p2_iset)
-    return self._jit_get_next_state(self.network_parameters.dynamics_params, p1_iset, p2_iset, p1_action, p2_action) 
+    return self.get_next_state_from_abstraction(p1_iset, p2_iset, p1_action, p2_action) 
     
   def get_legal_actions(self, public_state, obs, pl):
     if self.config.use_abstraction:
@@ -1348,14 +1426,82 @@ class MuZeroTrain():
     p2_current_iset = vectorized_abstraction(abstraction_params[1], iset_encoder_params[1], timestep.public_state, timestep.obs[..., 1, :])
     
     return self.dynamics_loss(dynamics_params, jnp.stack([p1_current_iset, p2_current_iset], -2), timestep.action, timestep.valid, timestep.reward)
-  
-   
-  def dynamics_loss(self, 
+
+  def dynamics_loss(self,
                     dynamics_params: Params,
                     obs: chex.Array,
                     action: chex.Array, 
                     valid: chex.Array, 
                     reward: chex.Array):
+    
+    
+    # Dynamics outputs reward for both players.
+    reward = jnp.stack((reward, -reward), axis=-1)
+
+    vectorized_dynamics = jax.vmap(self.dynamics_network.apply, in_axes=(None, 0, 0, 0, 0), out_axes=(0, 0, 0, 0))
+    @chex.dataclass(frozen=True)
+    class DynamicsCarry:  
+      p1_iset: chex.Array
+      p2_iset: chex.Array
+      
+    
+    def _dynamics_step(carry: DynamicsCarry, xs): 
+      next_p1_iset, next_p2_iset, next_reward, is_terminal = vectorized_dynamics(dynamics_params, carry.p1_iset, carry.p2_iset, action[..., 0, :], action[..., 1, :]) 
+      
+      
+      
+      new_carry = DynamicsCarry(
+        p1_iset = jnp.roll(next_p1_iset, shift=1, axis=0),
+        p2_iset = jnp.roll(next_p2_iset, shift=1, axis=0)
+      )
+      return new_carry, (jnp.roll(carry.p1_iset, shift=-1, axis=0),
+                         jnp.roll(carry.p2_iset, shift=-1, axis=0),
+                         next_p1_iset, next_p2_iset, next_reward, is_terminal)
+    
+    init_carry = DynamicsCarry( 
+      p1_iset = obs[..., 0, :],
+      p2_iset = obs[..., 1, :] 
+    )
+    
+    # The result shape is [T, T, B, ...], the first T corresponds to the passes through the dynamics network. Second T corresponds to the trajectory. As an example [A, C] is if the state in trajectory (id C-A) was passed A-times through the network, so it predicts C-th state in the same trajectory.
+    _, (target_p1_iset, target_p2_iset, predicted_p1_iset, predicted_p2_iset, predicted_rewards, predicted_terminals) = lax.scan(f=_dynamics_step, init=init_carry, xs = None, length=self.config.trajectory_max)
+    
+    # Just shifts the valid by one to the left
+    valid_prediction = lax.pad(valid, 0.0, [(0, 1, 0), (0, 0, 0)])[1:]
+    
+    # The original - shifted finds where they change. That is the last non-terminal state
+    terminal = valid - valid_prediction
+    
+  
+    valid_dynamics = jnp.tri(self.config.trajectory_max).T
+    
+    
+    valid_prediction = valid_dynamics[..., None] * valid_prediction[None, ...]
+    valid_dynamics = valid_dynamics[..., None] * valid[None, ...]
+    
+    normalization = jnp.sum(valid_dynamics)
+
+    prediction_normalization = jnp.sum(valid_prediction)
+    
+    p1_iset_loss = masked_l2_loss_with_normalization(predicted_p1_iset, target_p1_iset, valid_prediction[..., None], prediction_normalization)
+    p2_iset_loss = masked_l2_loss_with_normalization(predicted_p2_iset, target_p2_iset, valid_prediction[..., None], prediction_normalization)
+  
+    reward_loss = masked_l2_loss_with_normalization(predicted_rewards, reward[None, ...], valid_dynamics[..., None], normalization) 
+    terminal_loss = optax.sigmoid_binary_cross_entropy(jnp.squeeze(predicted_terminals), terminal[None, ...]) * valid_dynamics
+    terminal_loss = jnp.sum(terminal_loss) / (normalization + (normalization == 0))
+    
+    
+    return p1_iset_loss + p2_iset_loss + 5 * (reward_loss + terminal_loss)
+    
+  
+  def dynamics_loss_single_step(self, 
+                    dynamics_params: Params,
+                    obs: chex.Array,
+                    action: chex.Array, 
+                    valid: chex.Array, 
+                    reward: chex.Array):
+    
+    
     
     non_terminal = lax.pad(valid, 0.0, [(0, 1, 0), (0, 0, 0)])[1:]
     reward = jnp.stack((reward, -reward), axis=-1)
@@ -1383,6 +1529,51 @@ class MuZeroTrain():
     
     # return reward_loss + terminal_loss
     return dynamics_loss + 7 * reward_loss + 7 * terminal_loss
+      
+  def abstracted_ps_dynamics_loss(self,
+                               dynamics_params: Params, 
+                               abstraction_params: tuple[Params, Params], 
+                               iset_encoder_params: tuple[Params, Params], 
+                               timestep: TimeStep):
+    
+    vectorized_abstraction = jax.vmap(self._jit_get_abstraction_with_iset_id, in_axes=(None, None, 0, 0), out_axes=(0, 0)) 
+    
+    p1_iset_id, p1_abstracted_iset = vectorized_abstraction(abstraction_params[0], iset_encoder_params[0], timestep.public_state, timestep.obs[..., 0, :])
+    p2_iset_id, p2_abstracted_iset = vectorized_abstraction(abstraction_params[1], iset_encoder_params[1], timestep.public_state, timestep.obs[..., 1, :])
+     
+    non_terminal = lax.pad(timestep.valid, 0.0, [(0, 1, 0), (0, 0, 0)])[1:]
+    reward = jnp.stack((timestep.reward, -timestep.reward), axis=-1)
+    
+    vectorized_dynamics = jax.vmap(self.dynamics_network.apply, in_axes=(None, 0, 0, 0, 0), out_axes=(0, 0, 0, 0, 0))
+    
+    next_ps, next_p1_dist, next_p2_dist, next_reward, is_terminal = vectorized_dynamics(dynamics_params, p1_abstracted_iset, p2_abstracted_iset, timestep.action[..., 0, :], timestep.action[..., 1, :]) 
+
+    real_p1_iset_id = jnp.squeeze(jnp.roll(p1_iset_id, shift=-1, axis=0))
+    real_p2_iset_id = jnp.squeeze(jnp.roll(p2_iset_id, shift=-1, axis=0)) 
+    
+    
+    real_ps = jnp.roll(timestep.public_state, shift=-1, axis=0)
+    
+    dynamics_normalization = jnp.sum(non_terminal)
+    normalization = jnp.sum(timestep.valid)
+    
+    ps_loss = (lax.stop_gradient(real_ps) - next_ps) * non_terminal[..., None]
+    ps_loss = jnp.sum(ps_loss ** 2) / (dynamics_normalization + (dynamics_normalization == 0))
+    
+    p1_iset_loss = optax.softmax_cross_entropy_with_integer_labels(next_p1_dist, lax.stop_gradient(real_p1_iset_id))
+    p2_iset_loss = optax.softmax_cross_entropy_with_integer_labels(next_p2_dist, lax.stop_gradient(real_p2_iset_id))
+    
+    p1_iset_loss = jnp.sum(p1_iset_loss) / (dynamics_normalization + (dynamics_normalization == 0))
+    p2_iset_loss = jnp.sum(p2_iset_loss) / (dynamics_normalization + (dynamics_normalization == 0))
+    
+    reward_loss = ((lax.stop_gradient(reward) - next_reward) ** 2) * timestep.valid[..., None]
+    reward_loss =  jnp.sum(reward_loss) / (normalization + (normalization == 0))
+    
+    terminal_loss = optax.sigmoid_binary_cross_entropy(jnp.squeeze(is_terminal),  lax.stop_gradient(1 - non_terminal)) * timestep.valid
+    terminal_loss = jnp.sum(terminal_loss) / (normalization + (normalization == 0))
+    
+    # return reward_loss + terminal_loss
+    return ps_loss + p1_iset_loss + p2_iset_loss + 7 * reward_loss + 7 * terminal_loss
       
       
   def update_rnad(
@@ -2245,10 +2436,16 @@ def main():
   
   game = JaxGoofspiel(cards, points_order)
   
+  init, _ = game.initialize_structures(jax.random.key(0))
+  
+  _, init_p1, init_p2, init_ps = game.get_info(init)
   # game = orig_game 
   mu = True
   if mu == True:
-    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=False, sampling_epsilon=0.0, entropy_schedule_size=(3000,)))
+    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,), dynamics_type="iset", similarity_metric="legal_actions"))
+    p1_iset, p2_iset, reward, terminal = muzero.get_next_state(jnp.array([init_ps, init_ps]), jnp.array([init_p1, init_p1]), jnp.array([init_p2, init_p2]), jnp.array([0, 4]), jnp.array([3, 2]))
+    print(p1_iset)
+    print(p2_iset)
     # muzero.rng_key = jax.random.PRNGKey(42)
   else:
     params = [(n, p) for n, p in params.items()]
@@ -2258,7 +2455,7 @@ def main():
   # profiler = Profiler()
   # profiler.start()
   with chex.fake_jit():
-    for _ in range(1):
+    for _ in range(100):
       muzero.jax_step()
   print("Trained")
      

@@ -2,11 +2,24 @@ from typing import Callable
 
 import flax
 import jax
+import jax.numpy as jnp
+import jax.lax as lax
 import optax
 import chex
 
 Optimizer = Callable[[chex.ArrayTree, chex.ArrayTree], chex.ArrayTree]  # (params, grads) -> params
 
+
+def masked_l2_loss(y_predicted, y_target, mask):
+  '''Computes the masked L2 loss with mask. It expects the shape of the inputs to be compatible'''  
+  chex.assert_equal_rank((y_predicted, y_target, mask))
+  loss = ((lax.stop_gradient(y_target) - y_predicted) ** 2) * mask
+  return jnp.sum(loss)
+
+def masked_l2_loss_with_normalization(y_predicted, y_target, mask, norm):
+  '''Computes the masked L2 loss with normalization. It expects the shape of the inputs (except norm) to be compatible'''  
+  loss = masked_l2_loss(y_predicted, y_target, mask)
+  return loss / (norm + (norm == 0))
 
 def optax_optimizer(
     params: chex.ArrayTree,
