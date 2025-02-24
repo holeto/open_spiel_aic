@@ -7,14 +7,15 @@ from pyinstrument import Profiler
 
 
 def test_gameplay(key, game:JaxLeduc):
-  game_state, key, legals = game.initialize_structures(key)
+  game_state, legals = game.initialize_structures(key)
+  key = jax.random.split(key, 1)[0]
   all_actions = jnp.arange(legals.shape[1])
   print("Dealt cards: ", game_state.private_cards)
   opp_action = 0
   acting_player = 0
   turn = 0
   terminal = False
-  while not terminal:
+  while turn <= 10:
     state_tensor, p1_iset_tensor, p2_iset_tensor, public_state_tensor = game.get_info(game_state)
     #print("State: ", state_tensor)
     #print("P1 iset: ", p1_iset_tensor)
@@ -27,11 +28,13 @@ def test_gameplay(key, game:JaxLeduc):
     print("Legal actions: ")
     print(legals)
     prev_public_card = game_state.public_card
-    game_state, key, terminal, rewards, new_legals= game.apply_action(game_state, key, turn, actions)
+    game_state, terminal, rewards, new_legals= game.apply_action(game_state, key, turn, actions)
+    key = jax.random.split(key, 1)[0]
     
     print("Public card: ", game_state.public_card)
     print("Current chips: ", game_state.current_chips)
     print("Rewards: ", rewards)
+    print("Terminal: ", terminal)
     legals = new_legals
     acting_player = 0 if prev_public_card == 0 and game_state.public_card > 0 else 1 - acting_player
     turn += 1
@@ -53,12 +56,14 @@ def test_batch(key, game:JaxLeduc, batch_size, experiment_repeats=20):
   profiler.start()
   for _ in range(experiment_repeats):
     keys = jax.random.split(key, batch_size)
-    game_state, keys, legals = vectorized_init(keys)
+    game_state, legals = vectorized_init(keys)
+    keys = jax.random.split(key, batch_size)
     all_actions = jnp.tile(jnp.arange(legals.shape[2]), (batch_size, 1))
     for _ in range(8):
       acting_legals = np.asarray(legals[:, acting_player, :], dtype="float64")
       keys, actions = vectorized_choice(keys, all_actions, acting_legals, acting_player)
-      game_state, keys, terminal, rewards, new_legals = vectorized_apply_action(game_state, keys, turn, actions)
+      keys = jax.random.split(key, batch_size)
+      game_state, terminal, rewards, new_legals = vectorized_apply_action(game_state, keys, turn, actions)
       legals = new_legals
       acting_player = 1- acting_player
       turn += 1

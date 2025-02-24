@@ -17,6 +17,8 @@ class LeducGameState(GameState):
     private_cards: chex.Array
     current_chips: chex.Array
     turns_this_round: chex.Array
+    terminal: chex.Array #Remember this to make sure that the state is correctly marked as terminal, 
+    #when playing additional actions in terminal state
 
 
 class JaxLeduc(JaxGame):
@@ -90,7 +92,8 @@ class JaxLeduc(JaxGame):
                             public_card = public_card,
                             private_cards=chosen_cards,
                             current_chips = current_chips,
-                            turns_this_round = turns_this_round)
+                            turns_this_round = turns_this_round,
+                            terminal= jnp.array(0, dtype=bool))
     return game_state, legals
   
   @functools.partial(jax.jit, static_argnums=(0))
@@ -112,7 +115,7 @@ class JaxLeduc(JaxGame):
 
   #TODO: This could surely be improved by passing and returning less stuff
   @functools.partial(jax.jit, static_argnums=(0))
-  def apply_action(self, game_state:LeducGameState , key, turn, actions):
+  def apply_action(self, game_state : LeducGameState , key, turn, actions):
     oh_actions = jax.nn.one_hot(actions, self.num_actions)
     #action history does not contain the last action as that
     #will always take the game to a terminal state
@@ -167,16 +170,20 @@ class JaxLeduc(JaxGame):
    
 
     terminal = jnp.logical_or(folded, jnp.logical_and(jnp.logical_and(round > 0, turns_this_round >= 1), bets_equal))
+    terminal = jnp.squeeze(terminal)
     
   
     #The division by self.max_bet_amount to make sure the rewards is normalized to [-1, 1] range
     reward = jnp.where(terminal, jnp.where(jnp.logical_and(tie, ~folded), 0, ((1 - 2 * winner) * current_chips[1-winner]) / self.max_bet_amount), 0)
-  
+
+    #If terminal state was already reached, mark this as terminal as well
+    terminal = jnp.logical_or(game_state.terminal, terminal)
 
     new_game_state = LeducGameState(action_history=action_history,
                            public_card = public_card,
                            private_cards=game_state.private_cards,
                            current_chips = current_chips,
-                           turns_this_round = turns_this_round + 1)
+                           turns_this_round = turns_this_round + 1,
+                           terminal = terminal)
 
-    return new_game_state, jnp.squeeze(terminal), reward[0], new_legals
+    return new_game_state, terminal, reward[0], new_legals
