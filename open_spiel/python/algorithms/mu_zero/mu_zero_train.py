@@ -406,7 +406,7 @@ def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: ch
   cluster_distance = jnp.linalg.norm(cluster_difference, axis=-1)
   
   cluster_soft_assignement = compute_soft_assignments(cluster_distance * temperature)
-  cluster_soft_assignement = normalize_direction_with_mask(cluster_soft_assignement, valid)
+  # cluster_soft_assignement = normalize_direction_with_mask(cluster_soft_assignement, valid)
     
   
   cluster_loss = jnp.mean(cluster_difference ** 2, axis=-1)
@@ -415,12 +415,11 @@ def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: ch
   
 def _compute_soft_kmeans_loss_with_single(real, pred, probs, valid):
   cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred, valid, 1.0)
-  prob_loss = optax.losses.softmax_cross_entropy(probs,  jax.lax.stop_gradient(cluster_soft_assignement))
-  # labels = jnp.argmax(cluster_soft_assignement, axis=-1)
-  # smoothed_labels = jax.nn.one_hot(jnp.argmax(probs, axis=-1), probs.shape[-1])
-  # smoothed_labels = optax.smooth_labels(smoothed_labels, 0.1)
   
-  # prob_loss = optax.losses.softmax_cross_entropy_with_integer_labels(probs, jax.lax.stop_gradient(jnp.argmax(cluster_soft_assignement, axis=-1)))
+  cluster_soft_assignement = jnp.where(cluster_soft_assignement >= jnp.max(cluster_soft_assignement, -1, keepdims=True), 1, 0)
+  
+  prob_loss = optax.losses.softmax_cross_entropy(probs,  jax.lax.stop_gradient(cluster_soft_assignement))
+  
   return cluster_loss + jnp.mean(prob_loss)
 
 # This contains RNaD implementation. Note that this implementation is specific for two-player zero-sum games. Unlike the open_spiel RNaD that can be used to general-sum multiplayer games.
