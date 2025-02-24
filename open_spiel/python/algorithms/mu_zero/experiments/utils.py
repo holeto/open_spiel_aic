@@ -3,8 +3,9 @@ import pyspiel
 import jax
 import numpy as np
 
-from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame
 from open_spiel.python.policy import TabularPolicy
+from open_spiel.python.algorithms.best_response import BestResponsePolicy
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame
 
 def load_model(filepath: str):
   with open(filepath, "rb") as f:
@@ -19,8 +20,8 @@ def stringify(a):
   return ",".join(str(i) for i in a)
 
 #IMPORTANT!!! Will only work for games without chance nodes.
-def get_tabular_from_string(policy: dict, orig_game: pyspiel.Game, jax_game: JaxGame, tab_policy: TabularPolicy):
-  
+def get_tabular_from_string(policy: dict, spiel_game: pyspiel.Game, jax_game: JaxGame):
+  tab_policy = TabularPolicy(spiel_game)
   def _traverse_tree(state, game_state, key, depth=0):
     if state.is_terminal():
       return
@@ -42,5 +43,15 @@ def get_tabular_from_string(policy: dict, orig_game: pyspiel.Game, jax_game: Jax
   #using seed 0 here, as this is not a game with chance nodes it can be arbitrary
   start_key = jax.random.key(0)
   start_key, action_key = jax.random.split(start_key)
-  _traverse_tree(orig_game.new_initial_state(), *jax_game.initialize_structures(start_key)[:-1], action_key)
+  _traverse_tree(spiel_game.new_initial_state(), *jax_game.initialize_structures(start_key)[:-1], action_key)
   return tab_policy    
+
+ 
+def exploitability_jax_game(policy: dict, spiel_game: pyspiel.Game, jax_game: JaxGame):
+    
+  tab_policy = get_tabular_from_string(policy, spiel_game, jax_game)
+  
+  br1 = BestResponsePolicy(spiel_game, 1, tab_policy)
+  br2 = BestResponsePolicy(spiel_game, 0, tab_policy)
+   
+  return br1.value(spiel_game.new_initial_state()), br2.value(spiel_game.new_initial_state())
