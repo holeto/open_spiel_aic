@@ -53,9 +53,9 @@ def train(args, game, trajectory_max, save_folder):
   if not os.path.exists(save_folder):
     os.makedirs(save_folder)
   
-  for iteration in range(args.iterations):
-    train_algorithm.multiple_jax_steps(args.save_each)
+  for iteration in range(args.iterations + 1):
     file_name = save_folder + "muzero_" + str(iteration) + ".pkl" 
     print("Saving iteration", iteration, flush=True)
     save_model(file_name, train_algorithm)
+    train_algorithm.multiple_jax_steps(args.save_each)
     
