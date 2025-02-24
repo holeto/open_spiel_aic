@@ -21,6 +21,8 @@ def train(args, game, trajectory_max, save_folder):
     abstraction_size=args.abstraction_size,
     similarity_metric=args.similarity_metric,
     
+    dynamics_type=args.dynamics_type,
+    
     ps_encoder_hidden_size=args.ps_encoder_hidden_size,
     ps_decoder_hidden_size=args.ps_decoder_hidden_size,
     iset_hidden_size=args.iset_hidden_size,
