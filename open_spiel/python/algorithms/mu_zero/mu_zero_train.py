@@ -1905,76 +1905,12 @@ class MuZeroTrain():
     
     
     return self.update_parameters(network_parameters, optimizers, lax.stop_gradient(trajectory), alpha, update_net)
-  
-  
-  @functools.partial(jax.jit, static_argnums=(0,))
-  def update_jax_parameters_no_rnad(
-    self,
-    network_parameters: NetworkParameters,
-    optimizers: Optimizers,
-    key: chex.Array,
-    alpha,
-    update_net, 
-  ):
-    timestep = self.sample_jax_trajectories(network_parameters.rnad_params, key)
-     
-    
-    dynamics_params, optimizers = self.update_dynamics(
-      network_parameters.dynamics_params,
-      network_parameters.abstraction_params,
-      network_parameters.iset_encoder_params,
-      optimizers,
-      timestep)
-    
-    
-    return NetworkParameters(
-      # rnad_params=rnad_params,
-      # rnad_params_target=rnad_params_target,
-      # rnad_params_prev=rnad_params_prev,
-      # rnad_params_prev_=rnad_params_prev_,
-      # # expected_params = expected_params,
-      # # expected_params_target = expected_params_target,
-      # mvs_params=mvs_params,
-      # mvs_params_target=mvs_params_target,
-      # transformation_params=transformation_params,
-      # abstraction_params=abstraction_params,
-      # iset_encoder_params=iset_encoder_params,
-      # similarity_params=similarity_params,
-      dynamics_params=dynamics_params
-      ), optimizers
-   
-  def jax_step(self):
-    key = self.get_next_rng_key()
-    alpha, update_regularization = self._entropy_schedule(self.learner_steps)
-    
-    self.network_parameters, self.optimizers = self.update_jax_parameters(
-      self.network_parameters,
-      self.optimizers,
-      key, 
-      alpha, 
-      update_regularization)
-    
-    self.learner_steps +=1
-    
+
     
   def multiple_jax_steps(self, iter: int):
     for _ in range(iter):
       self.jax_step() 
-      
-  def multiple_jax_steps2(self, iter: int):
-    for _ in range(iter):
-      key = self.get_next_rng_key()
-      alpha, update_regularization = self._entropy_schedule(self.learner_steps)
-      
-      self.network_parameters, self.optimizers = self.update_jax_parameters_no_rnad(
-        self.network_parameters,
-        self.optimizers,
-        key, 
-        alpha, 
-        update_regularization)
-      
-      self.learner_steps +=1
-      
+    
       
   def update_rnad_with_expected(
     self,
@@ -2004,7 +1940,7 @@ class MuZeroTrain():
         lambda: (rnad_params_prev, rnad_params_prev_))
     return rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers  
     
-  def v_trace_with_expected(
+  def compute_q_values_from_expected(
     self,
     state_v: chex.Array,
     valid: chex.Array,
@@ -2012,10 +1948,7 @@ class MuZeroTrain():
     network_policy: chex.Array,
     regularization_term: chex.Array,
     action_oh: chex.Array,  
-    reward: chex.Array,
-    lambda_: float = 1.0,
-    c: float = 1.0,
-    rho: float = 1.0,
+    reward: chex.Array, 
     eta: float = 0.2,
     gamma: float = 1.0
   ):
@@ -2067,11 +2000,9 @@ class MuZeroTrain():
     
   def rnad_with_expected_loss(
     self,
-    rnad_params: Params,
-    # rnad_params_target: Params,
+    rnad_params: Params, 
     rnad_params_prev: Params,
-    rnad_params_prev_: Params,
-    # expected_params: Params,
+    rnad_params_prev_: Params, 
     expected_params: Params,
     timestep: TimeStep,
     alpha: float
@@ -2089,16 +2020,14 @@ class MuZeroTrain():
     expanded_valid = jnp.expand_dims(timestep.valid, (-2, -1))
     regularized_term = log_pi - (alpha * log_pi_prev + (1 - alpha) * log_pi_prev_)
     
-    v_train_target, q_value = self.v_trace_with_expected(
+    v_train_target, q_value = self.compute_q_values_from_expected(
       state_v, 
       expanded_valid, 
       timestep.policy, 
       pi, 
       regularized_term, 
       timestep.action, 
-      timestep.reward, 
-      c=self.config.c_iset_vtrace, 
-      rho=self.config.rho_iset_vtrace, 
+      timestep.reward,  
       eta=self.config.eta_regularization
     )
     v_loss = 0.0
