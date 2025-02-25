@@ -297,6 +297,13 @@ class MuZeroTrainConfig:
   abstraction_size: int = 32
   similarity_metric: SimilarityMetric = SimilarityMetric.POLICY_VALUE
   
+  abstraction_soft_k_means_temperature: float = 1.0
+  abstraction_soft_k_means_closeness_assignment: float = 0.5
+  abstraction_soft_k_means_repulsive_force: float = 3.0
+  transformation_soft_k_means_temperature: float = 1.0
+  transformation_soft_k_means_closeness_assignment: float = 0.5
+  transformation_soft_k_means_repulsive_force: float = 3.0
+  
   dynamics_type: DynamicsType = DynamicsType.PUBLIC_STATE
   
   ps_encoder_hidden_size: int = 128
@@ -388,24 +395,24 @@ def normalize_direction_with_mask(x:chex.Array, mask:chex.Array) -> chex.Array:
 
 
 
-def compute_soft_assignments(cluster_distance, cluster_assignment: float=0.3):
+def compute_soft_assignments(cluster_distance: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float):
   '''Computes a soft-assignments to soft k-means (fuzzy c-means). This is not the original method. When more than 1 point is too close to the center, we only move the closest one.'''
   closest = jnp.min(cluster_distance, -1, keepdims=True)
-  nulled_clusters = jnp.where(jnp.logical_and(cluster_distance < cluster_assignment, cluster_distance > closest + 1e-10), 0, 1)
-  soft_assignments = jax.nn.softmax(-cluster_distance, axis=-1)
-  soft_assignments = jnp.where(jnp.logical_and(cluster_distance < cluster_assignment, cluster_distance > closest + 1e-10), -soft_assignments, soft_assignments)
+  # nulled_clusters = jnp.where(jnp.logical_and(cluster_distance < cluster_closeness_assignment, cluster_distance > closest + 1e-10), 0, 1)
+  soft_assignments = jax.nn.softmax(-cluster_distance * temperature, axis=-1)
+  soft_assignments = jnp.where(jnp.logical_and(cluster_distance < cluster_closeness_assignment, cluster_distance > closest + 1e-10), -soft_assignments * repulsive_force, soft_assignments)
   # soft_assignment = _legal_policy(-cluster_distance, nulled_clusters)
   return soft_assignments
 
 
 # TODO: This should take valid into account
-def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: chex.Array, valid: chex.Array, temperature: float=1.0):
+def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: chex.Array, valid: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float):
   # The predicted dimension is missing
   chex.assert_shape((real,), (*pred.shape[:-2], pred.shape[-1]))
   cluster_difference = lax.stop_gradient(jnp.expand_dims(real, -2)) - pred
   cluster_distance = jnp.linalg.norm(cluster_difference, axis=-1)
   
-  cluster_soft_assignement = compute_soft_assignments(cluster_distance * temperature)
+  cluster_soft_assignement = compute_soft_assignments(cluster_distance, temperature, cluster_closeness_assignment, repulsive_force)
   # cluster_soft_assignement = normalize_direction_with_mask(cluster_soft_assignement, valid)
     
   
@@ -413,12 +420,16 @@ def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: ch
   cluster_loss = jnp.sum(cluster_loss * cluster_soft_assignement, axis=-1)
   return jnp.mean(cluster_loss), cluster_soft_assignement
   
-def _compute_soft_kmeans_loss_with_single(real, pred, probs, valid):
-  cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred, valid, 1.0)
+def _compute_soft_kmeans_loss_with_single(real: chex.Array, pred: chex.Array, probs: chex.Array, valid: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float):
+  cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred, valid, temperature, cluster_closeness_assignment, repulsive_force)
   
-  cluster_soft_assignement = jnp.where(cluster_soft_assignement >= jnp.max(cluster_soft_assignement, -1, keepdims=True), 1, 0)
+  # cluster_soft_assignement = jnp.where(cluster_soft_assignement >= jnp.max(cluster_soft_assignement, -1, keepdims=True), 1, 0)
+  # prob_loss = optax.losses.softmax_cross_entropy(probs,  jax.lax.stop_gradient(cluster_soft_assignement))
   
-  prob_loss = optax.losses.softmax_cross_entropy(probs,  jax.lax.stop_gradient(cluster_soft_assignement))
+  cluster_hard_assignement = jnp.argmax(cluster_soft_assignement, axis=-1)
+  
+  prob_loss = optax.softmax_cross_entropy_with_integer_labels(probs, cluster_hard_assignement)
+  
   
   return cluster_loss + jnp.mean(prob_loss)
 
@@ -441,7 +452,8 @@ class MuZeroTrain():
     else:
       self.obs = self.game.information_state_tensor_shape()
       
-    self.rng_key = jax.random.PRNGKey(self.config.seed)
+    # self.rng_key = jax.random.PRNGKey(self.config.seed)
+    self.rng_key = jax.random.key(self.config.seed)
     
     # temp_keys = self.get_next_rng_keys(6)
     
@@ -538,8 +550,8 @@ class MuZeroTrain():
     expected_params_target = self.expected_network.init(temp_keys[15], self.example_timestep.obs, self.example_timestep.obs)
     
     
-    p1_abstraction_optimizer = optax_optimizer(p1_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
-    p2_abstraction_optimizer = optax_optimizer(p2_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    p1_abstraction_optimizer = optax_optimizer(p1_abstraction_params, optax.chain(optax.sgd(self.config.learning_rate), optax.clip(100)))
+    p2_abstraction_optimizer = optax_optimizer(p2_abstraction_params, optax.chain(optax.sgd(self.config.learning_rate), optax.clip(100)))
 
     p1_iset_encoder_optimizer = optax_optimizer(p1_iset_encoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_iset_encoder_optimizer = optax_optimizer(p2_iset_encoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
@@ -1198,7 +1210,12 @@ class MuZeroTrain():
     update_direction = transform_trajectory_to_last_dimension(update_direction)
     valid_clusters = jnp.ones(predicted_direction.shape[:-1])
     
-    loss, _ = _compute_soft_kmeans_loss_with_cluster_assignments(update_direction, predicted_direction, valid_clusters)
+    loss, _ = _compute_soft_kmeans_loss_with_cluster_assignments(update_direction,
+                                                                 predicted_direction,
+                                                                 valid_clusters,
+                                                                 self.config.transformation_soft_k_means_temperature,
+                                                                 self.config.transformation_soft_k_means_closeness_assignment,
+                                                                 self.config.transformation_soft_k_means_repulsive_force)
     return loss
   
   def state_v_trace(
@@ -1359,7 +1376,14 @@ class MuZeroTrain():
     ps_loss = jnp.mean(ps_loss ** 2)
     
     # This computes the kmeans loss and the iset loss. TODO: Add the weighted term to the pi/v distance 
-    return _compute_soft_kmeans_loss_with_single(similarity_target, similarity, iset_probs, valid[..., None]) + ps_loss
+    return _compute_soft_kmeans_loss_with_single(similarity_target,
+                                                 similarity,
+                                                 iset_probs,
+                                                 valid[..., None],
+                                                 self.config.abstraction_soft_k_means_temperature, 
+                                                 self.config.abstraction_soft_k_means_closeness_assignment,
+                                                 self.config.abstraction_soft_k_means_repulsive_force
+                                                 ) + ps_loss
     
   def non_abstracted_legal_actions_loss(self,
                                         legal_actions_params: Params,
@@ -1560,8 +1584,8 @@ class MuZeroTrain():
     ps_loss = (lax.stop_gradient(real_ps) - next_ps) * non_terminal[..., None]
     ps_loss = jnp.sum(ps_loss ** 2) / (dynamics_normalization + (dynamics_normalization == 0))
     
-    p1_iset_loss = optax.softmax_cross_entropy_with_integer_labels(next_p1_dist, lax.stop_gradient(real_p1_iset_id))
-    p2_iset_loss = optax.softmax_cross_entropy_with_integer_labels(next_p2_dist, lax.stop_gradient(real_p2_iset_id))
+    p1_iset_loss = optax.softmax_cross_entropy_with_integer_labels(next_p1_dist, lax.stop_gradient(real_p1_iset_id)) * non_terminal
+    p2_iset_loss = optax.softmax_cross_entropy_with_integer_labels(next_p2_dist, lax.stop_gradient(real_p2_iset_id)) * non_terminal
     
     p1_iset_loss = jnp.sum(p1_iset_loss) / (dynamics_normalization + (dynamics_normalization == 0))
     p2_iset_loss = jnp.sum(p2_iset_loss) / (dynamics_normalization + (dynamics_normalization == 0))
@@ -1573,7 +1597,7 @@ class MuZeroTrain():
     terminal_loss = jnp.sum(terminal_loss) / (normalization + (normalization == 0))
     
     # return reward_loss + terminal_loss
-    return ps_loss + p1_iset_loss + p2_iset_loss + 7 * reward_loss + 7 * terminal_loss
+    return ps_loss + 3 * ( p1_iset_loss + p2_iset_loss + reward_loss +  terminal_loss )
       
       
   def update_rnad(
@@ -2443,7 +2467,7 @@ def main():
   # game = orig_game 
   mu = True
   if mu == True:
-    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,), dynamics_type="iset", similarity_metric="legal_actions"))
+    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=32, trajectory_max=cards-1, use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,), dynamics_type="public_state", similarity_metric="legal_actions"))
     # muzero.rng_key = jax.random.PRNGKey(42)
   else:
     params = [(n, p) for n, p in params.items()]

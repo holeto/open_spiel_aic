@@ -5,6 +5,8 @@ from open_spiel.python.algorithms.mu_zero.experiments.utils import save_model
 import os
 
 def train(args, game, trajectory_max, save_folder):
+  
+    
   config = MuZeroTrainConfig(
     batch_size=args.batch_size,
     trajectory_max=trajectory_max,
@@ -20,6 +22,14 @@ def train(args, game, trajectory_max, save_folder):
     abstraction_amount=args.abstraction_amount,
     abstraction_size=args.abstraction_size,
     similarity_metric=args.similarity_metric,
+    
+    
+    abstraction_soft_k_means_temperature=args.abstraction_soft_k_means_temperature,
+    abstraction_soft_k_means_closeness_assignment=args.abstraction_soft_k_means_closeness_assignment,
+    abstraction_soft_k_means_repulsive_force=args.abstraction_soft_k_means_repulsive_force,
+    transformation_soft_k_means_temperature=args.transformation_soft_k_means_temperature,
+    transformation_soft_k_means_closeness_assignment=args.transformation_soft_k_means_closeness_assignment,
+    transformation_soft_k_means_repulsive_force=args.transformation_soft_k_means_repulsive_force,
     
     dynamics_type=args.dynamics_type,
     
