@@ -1905,7 +1905,18 @@ class MuZeroTrain():
     
     
     return self.update_parameters(network_parameters, optimizers, lax.stop_gradient(trajectory), alpha, update_net)
-
+  def jax_step(self):
+    key = self.get_next_rng_key()
+    alpha, update_regularization = self._entropy_schedule(self.learner_steps)
+    
+    self.network_parameters, self.optimizers = self.update_jax_parameters(
+      self.network_parameters,
+      self.optimizers,
+      key, 
+      alpha, 
+      update_regularization)
+    
+    self.learner_steps +=1
     
   def multiple_jax_steps(self, iter: int):
     for _ in range(iter):
