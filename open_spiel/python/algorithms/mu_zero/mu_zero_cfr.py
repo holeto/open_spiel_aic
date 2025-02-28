@@ -47,6 +47,9 @@ class MuZeroCFRConstants:
   
 class MuZeroCFR:
   def __init__(self, constants: MuZeroCFRConstants):
+    
+    self.check_constants(constants)
+    
     self.constants = constants
     self.players = 2
     self._linear_averaging = True
@@ -60,6 +63,35 @@ class MuZeroCFR:
     self.cf_values = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0]),) for pl in range(self.players)] for d, _ in enumerate(constants.depth_actions)]
     
     self.regret_matching = jax.vmap(regret_matching, in_axes=(0, 0), out_axes=0)
+    
+  def check_constants(self, constants: MuZeroCFRConstants):
+    # TODO: Change those to chex
+    assert constants.max_depth > 0, "Max depth has to be at least 1"
+    assert constants.resolving_player in [0, 1], "Resolving player has to be 0 or 1"
+    assert constants.init_reaches.shape[0] == 2, "Reaches have to be for both players"
+    assert len(constants.depth_actions) == constants.max_depth, "Depth actions have to be defined for each depth"
+    assert len(constants.depth_iset_map) == constants.max_depth, "Depth iset map has to be defined for each depth"
+    assert len(constants.depth_iset_legal) == constants.max_depth, "Depth iset legal has to be defined for each depth"
+    assert len(constants.depth_history_action_utility) == constants.max_depth, "Depth history action utility has to be defined for each depth"
+    assert len(constants.depth_history_iset) == constants.max_depth, "Depth history iset has to be defined for each depth"
+    assert len(constants.depth_history_actions) == constants.max_depth, "Depth history actions has to be defined for each depth"
+    assert len(constants.depth_history_legal) == constants.max_depth, "Depth history legal has to be defined for each depth"
+    assert len(constants.depth_history_next_history) == constants.max_depth, "Depth history next history has to be defined for each depth" 
+    for d in range(constants.max_depth):
+      histories_in_depth = constants.depth_history_iset[d].shape[1]
+      for pl in range(2):
+        assert constants.depth_iset_legal[d][pl].shape[1] == constants.depth_actions[d]
+        # assert constants.dept
+      assert constants.depth_history_action_utility[d].shape[0] == histories_in_depth
+      assert constants.depth_history_action_utility[d].shape[1] == constants.depth_actions[d]
+      assert constants.depth_history_action_utility[d].shape[2] == constants.depth_actions[d]
+      assert constants.depth_history_next_history[d].shape[0] == histories_in_depth
+      assert constants.depth_history_next_history[d].shape[1] == constants.depth_actions[d]
+      assert constants.depth_history_next_history[d].shape[2] == constants.depth_actions[d]
+      assert constants.depth_history_legal[d].shape[0] == histories_in_depth
+      assert constants.depth_history_legal[d].shape[1] == constants.depth_actions[d]
+      assert constants.depth_history_legal[d].shape[2] == constants.depth_actions[d] 
+      assert constants.depth_history_actions[d].shape[1] == histories_in_depth
     
   def multiple_steps(self, iterations: int):
     for _ in range(iterations):

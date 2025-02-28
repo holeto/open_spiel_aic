@@ -5,7 +5,7 @@ import numpy as np
 
 from open_spiel.python.policy import TabularPolicy
 from open_spiel.python.algorithms.best_response import BestResponsePolicy
-from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame, JaxPolicy
 
 def load_model(filepath: str):
   with open(filepath, "rb") as f:
@@ -16,11 +16,13 @@ def save_model(filepath: str, data):
    with open(filepath, "wb") as f:
     pickle.dump(data, f)
 
-def stringify(a):
+def stringify(a: list[float]) -> str:
   return ",".join(str(i) for i in a)
 
+
+
 #IMPORTANT!!! Will only work for games without chance nodes.
-def get_tabular_from_string(policy: dict, spiel_game: pyspiel.Game, jax_game: JaxGame):
+def get_tabular_from_string(policy: JaxPolicy, spiel_game: pyspiel.Game, jax_game: JaxGame) -> TabularPolicy:
   tab_policy = TabularPolicy(spiel_game)
   def _traverse_tree(state, game_state, key, depth=0):
     if state.is_terminal():
@@ -28,6 +30,9 @@ def get_tabular_from_string(policy: dict, spiel_game: pyspiel.Game, jax_game: Ja
     p1_iset = state.information_state_string(0) 
     p2_iset = state.information_state_string(1)
     _, jax_p1, jax_p2, jax_ps = jax_game.get_info(game_state)
+    jax_p1 = np.array(jax_p1)
+    jax_p2 = np.array(jax_p2)
+
 
     for iset, jax_iset in zip([p1_iset, p2_iset], [jax_p1, jax_p2]):
       pol = tab_policy.policy_for_key(iset)
@@ -47,11 +52,11 @@ def get_tabular_from_string(policy: dict, spiel_game: pyspiel.Game, jax_game: Ja
   return tab_policy    
 
  
-def exploitability_jax_game(policy: dict, spiel_game: pyspiel.Game, jax_game: JaxGame):
+def exploitability_from_spiel_jax_game(policy: JaxPolicy, spiel_game: pyspiel.Game, jax_game: JaxGame) -> tuple[float, float]:
     
   tab_policy = get_tabular_from_string(policy, spiel_game, jax_game)
   
   br1 = BestResponsePolicy(spiel_game, 1, tab_policy)
   br2 = BestResponsePolicy(spiel_game, 0, tab_policy)
    
-  return br1.value(spiel_game.new_initial_state()), br2.value(spiel_game.new_initial_state())
+  return  br1, br2, br1.value(spiel_game.new_initial_state()), br2.value(spiel_game.new_initial_state())

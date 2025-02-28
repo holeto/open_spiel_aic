@@ -129,13 +129,14 @@ class JaxGoofspiel(JaxGame):
 
 
 class JaxModifiedGoofspiel(JaxGoofspiel):
-  def __init__(self, cards: int, turns:int, first_card: int) -> None:
+  def __init__(self, cards: int, turns:int, first_card: int, use_max: bool = True) -> None:
     assert turns <= cards, "Cannot have more turns than cards"
     assert turns > 0, "Cannot have 0 turns"
     
     self.cards = cards
     self.max_turns = turns
     self.first_card = first_card
+    self.use_max = use_max
 
 
   @functools.partial(jax.jit, static_argnums=(0))
@@ -171,7 +172,10 @@ class JaxModifiedGoofspiel(JaxGoofspiel):
     
     legal_actions = 1 - jnp.sum(played_cards, 1)
     
-    point_cards = game_state.point_cards + jax.nn.one_hot(turn + 1, self.max_turns) * jnp.max(actions, -1)
+    
+    next_point_card = jnp.where(self.use_max, jnp.max(game_state.point_cards, -1), jnp.min(game_state.point_cards, -1))
+    
+    point_cards = game_state.point_cards + jax.nn.one_hot(turn + 1, self.max_turns) * next_point_card
     
     next_action = jnp.argmax(legal_actions, -1)
     next_winner = jnp.argmax(next_action)
