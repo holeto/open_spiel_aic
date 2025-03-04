@@ -14,12 +14,13 @@ class GoofspielGameState(GameState):
 
 
 class JaxGoofspiel(JaxGame):
-  def __init__(self, cards, points_order="descending", turns=-1) -> None:
+  def __init__(self, cards, points_order="descending", turns=-1, reward_type: str = "clip") -> None:
     self.cards = cards
     self.max_turns = cards - 1
     if turns <= 0:
       self.max_turns = cards
     self.points_order = points_order 
+    self.reward_type = 0 if reward_type == "clip" else 1
   
   def new_initial_state(self):
     return 0
@@ -114,7 +115,9 @@ class JaxGoofspiel(JaxGame):
     
     p1_points = jnp.where(turn != self.cards - 2, p1_points, jnp.where(next_tie, p1_points, jnp.where(next_winner == 0, p1_points + next_point, p1_points - next_point)))
     
-    rewards = jnp.where(turn != self.cards - 2, 0, jnp.clip(jnp.sum(p1_points), -1, 1) )
+    rewards = jnp.where(self.reward_type == 0, jnp.clip(jnp.sum(p1_points), -1, 1), jnp.sum(p1_points))
+    
+    rewards = jnp.where(turn != self.cards - 2, 0, rewards)
     terminal = turn >= self.cards - 2
     
     # rewards = jnp.sum(p1_points)
@@ -129,7 +132,7 @@ class JaxGoofspiel(JaxGame):
 
 
 class JaxModifiedGoofspiel(JaxGoofspiel):
-  def __init__(self, cards: int, turns:int, first_card: int, use_max: bool = True) -> None:
+  def __init__(self, cards: int, turns:int, first_card: int, use_max: bool = True, reward_type: str = "clip") -> None:
     assert turns <= cards, "Cannot have more turns than cards"
     assert turns > 0, "Cannot have 0 turns"
     
@@ -137,6 +140,7 @@ class JaxModifiedGoofspiel(JaxGoofspiel):
     self.max_turns = turns
     self.first_card = first_card
     self.use_max = use_max
+    self.reward_type = 0 if reward_type == "clip" else 1
 
 
   @functools.partial(jax.jit, static_argnums=(0))
@@ -173,7 +177,7 @@ class JaxModifiedGoofspiel(JaxGoofspiel):
     legal_actions = 1 - jnp.sum(played_cards, 1)
     
     
-    next_point_card = jnp.where(self.use_max, jnp.max(game_state.point_cards, -1), jnp.min(game_state.point_cards, -1))
+    next_point_card = jnp.where(self.use_max, jnp.max(actions, -1), jnp.min(actions, -1))
     
     point_cards = game_state.point_cards + jax.nn.one_hot(turn + 1, self.max_turns) * next_point_card
     
@@ -185,7 +189,10 @@ class JaxModifiedGoofspiel(JaxGoofspiel):
     
     p1_points = jnp.where(turn != self.cards - 2, p1_points, jnp.where(next_tie, p1_points, jnp.where(next_winner == 0, p1_points + next_point, p1_points - next_point)))
     
-    rewards = jnp.where(turn != self.max_turns - 1, 0, jnp.clip(jnp.sum(p1_points), -1, 1) )
+    rewards = jnp.where(self.reward_type == 0, jnp.clip(jnp.sum(p1_points), -1, 1), jnp.sum(p1_points))
+    
+    rewards = jnp.where(turn != self.cards - 2, 0, rewards) 
+    
     terminal = turn >= self.max_turns - 1
     
     # point_cards = 
