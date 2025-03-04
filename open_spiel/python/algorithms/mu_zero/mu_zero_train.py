@@ -272,6 +272,7 @@ class SimilarityMetric(str, Enum):
   VALUE = "value"
   POLICY_VALUE = "policy_value"
   LEGAL_ACTIONS = "legal_actions"
+  LEGAL_POLICY_VALUE = "legal_policy_value"
  
  
 class DynamicsType(str, Enum):
@@ -630,6 +631,8 @@ class MuZeroTrain():
       return self.actions + 1
     elif self.config.similarity_metric == SimilarityMetric.LEGAL_ACTIONS:
       return self.actions
+    elif self.config.similarity_metric == SimilarityMetric.LEGAL_POLICY_VALUE:
+      return 2 * self.actions + 1
     assert False, "Unknown similarity metric"   
 
   def default_timestep(self):
@@ -1825,6 +1828,9 @@ class MuZeroTrain():
       similarity = v
     elif self.config.similarity_metric == SimilarityMetric.LEGAL_ACTIONS:
       similarity = (timestep.legal * 2) - 1 # to be in range [-1, 1]
+    elif self.config.similarity_metric + SimilarityMetric.LEGAL_POLICY_VALUE:
+      # TODO: Legal actions have half of the weights that policy has.
+      similarity = jnp.concatenate((timestep.legal - 0.5, (pi * 2) - 1, v), axis=-1)
       
     
     
