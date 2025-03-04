@@ -556,8 +556,8 @@ class MuZeroTrain():
     expected_params_target = self.expected_network.init(temp_keys[15], self.example_timestep.obs, self.example_timestep.obs)
     
     
-    p1_abstraction_optimizer = optax_optimizer(p1_abstraction_params, optax.chain(optax.sgd(self.config.learning_rate), optax.clip(100)))
-    p2_abstraction_optimizer = optax_optimizer(p2_abstraction_params, optax.chain(optax.sgd(self.config.learning_rate), optax.clip(100)))
+    p1_abstraction_optimizer = optax_optimizer(p1_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    p2_abstraction_optimizer = optax_optimizer(p2_abstraction_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
 
     p1_iset_encoder_optimizer = optax_optimizer(p1_iset_encoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_iset_encoder_optimizer = optax_optimizer(p2_iset_encoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))

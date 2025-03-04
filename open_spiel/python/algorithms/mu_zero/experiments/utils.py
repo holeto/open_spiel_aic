@@ -19,7 +19,8 @@ def save_model(filepath: str, data):
 def stringify(a: list[float]) -> str:
   return ",".join(str(i) for i in a)
 
-
+def destringify(a: str) -> list[float]:
+  return np.array([float(i) for i in a.split(",")])
 
 #IMPORTANT!!! Will only work for games without chance nodes.
 def get_tabular_from_string(policy: JaxPolicy, spiel_game: pyspiel.Game, jax_game: JaxGame) -> TabularPolicy:
