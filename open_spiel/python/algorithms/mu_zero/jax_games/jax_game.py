@@ -24,7 +24,11 @@ class GameState(ABC):
 
 #Abstract parent class for any jax game
 class JaxGame(ABC):
-
+  
+  def new_initial_state(self, key):
+    init_state, legals = self.initialize_structures(key)
+    return self.get_info(init_state)
+  
   @abstractmethod
   def num_distinct_actions(self):
     pass

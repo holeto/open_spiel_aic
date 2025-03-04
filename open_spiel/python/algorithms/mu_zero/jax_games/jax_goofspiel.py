@@ -21,9 +21,6 @@ class JaxGoofspiel(JaxGame):
       self.max_turns = cards
     self.points_order = points_order 
   
-  def new_initial_state(self):
-    return 0
-  
   def num_distinct_actions(self):
     return self.cards
   
