@@ -45,10 +45,6 @@ class JaxLeduc(JaxGame):
     #JAX constants TODO: Probably put this somewhere else
     self.invalid_action_mask = jax.nn.one_hot(INVALID_ID, self.num_actions)
 
-
-  def new_initial_state(self):
-    #TODO: Complete this
-    return 0
   
   def num_distinct_actions(self):
     return self.num_actions

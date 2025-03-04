@@ -22,9 +22,6 @@ class JaxGoofspiel(JaxGame):
     self.points_order = points_order 
     self.reward_type = 0 if reward_type == "clip" else 1
   
-  def new_initial_state(self):
-    return 0
-  
   def num_distinct_actions(self):
     return self.cards
   
