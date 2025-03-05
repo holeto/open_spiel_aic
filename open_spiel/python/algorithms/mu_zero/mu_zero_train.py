@@ -466,7 +466,7 @@ class MuZeroTrain():
     
     self.example_state  = self.new_initial_state()
     self.example_timestep = self.default_timestep()
-    self.example_obs = np.ones((1, self.obs))
+    self.example_obs = np.ones((self.obs))
     
     self._entropy_schedule = EntropySchedule(
         sizes=self.config.entropy_schedule_size,
@@ -655,7 +655,7 @@ class MuZeroTrain():
       reward = reward
     )
     # return ts
-    return jax.tree_util.tree_map(lambda xs: np.expand_dims(xs, 0), ts)
+    return ts
 
   def new_initial_state(self):
     if isinstance(self.game, JaxGame):
@@ -932,24 +932,24 @@ class MuZeroTrain():
     
     return jax.tree_util.tree_map(lambda *xs: np.stack(xs, axis=0), *timesteps)
   
-  
-  @functools.partial(jax.jit, static_argnums=(0,))
-  def sample_jax_trajectories(self, params, key) -> TimeStep:
-    action_key, chance_key, = jax.random.split(key)
-    game_keys = jax.random.split(action_key, self.config.batch_size)
-    trajectory_key = jax.random.split(chance_key, self.config.trajectory_max)
-    # turns = list(range(self.game.cards -1))
+  def sample_trajectory(self, params, key) ->  TimeStep:
+    init_key, trajectory_key, = jax.random.split(key)
+    trajectory_key = jax.random.split(trajectory_key, self.config.trajectory_max)
+    
     max_turns = self.config.trajectory_max
     actions = self.actions
-    
     @chex.dataclass(frozen=True)
     class SampleTrajectoryCarry:
       game_state: GameState
-      terminal: chex.Array
+      terminal: bool
       legal_actions: chex.Array
-    
-    vectorized_init = jax.vmap(self.game.initialize_structures, in_axes=(0), out_axes=(0, 0))     
-    game_state, legal_actions = vectorized_init(game_keys)
+          
+    game_state, legal_actions = self.game.initialize_structures(init_key)
+    init_carry = SampleTrajectoryCarry(
+      game_state = game_state,
+      terminal = False,
+      legal_actions = legal_actions
+    )
     
     @jax.jit
     def choice_wrapper(key, p):
@@ -957,35 +957,28 @@ class MuZeroTrain():
       action_oh = jax.nn.one_hot(action, actions)
       return action, action_oh
     
-    vectorized_get_info = jax.vmap(self.game.get_info, in_axes=(0), out_axes=(0, 0, 0, 0))
-    vectorized_apply_action = jax.vmap(self.game.apply_action, in_axes=(0, 0, None, 0), out_axes=(0, 0, 0, 0))
-    # first is for players, second for batch
-    vectorized_sample_action = jax.vmap(jax.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0), in_axes=(0, 0), out_axes=0)
-    network_apply = jax.vmap(self._jit_get_policy, in_axes=(None, 1, 1), out_axes=1)
-    
-    init_carry = SampleTrajectoryCarry(
-      game_state = game_state,
-      terminal= jnp.zeros((self.config.batch_size), dtype=bool),
-      legal_actions = legal_actions
-    )
+    vectorized_sample_action = jax.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0)
     
     def _sample_trajectory(carry: SampleTrajectoryCarry, xs) -> tuple[SampleTrajectoryCarry, chex.Array]:
       (key, turn) = xs
-      _, p1_iset, p2_iset, public_state = vectorized_get_info(carry.game_state)
-      obs = jnp.stack((p1_iset, p2_iset), axis=1)
-      public_state = jnp.where(carry.terminal[..., None], self.example_timestep.public_state, public_state)
-      obs = jnp.where(carry.terminal[..., None, None], self.example_timestep.obs, obs)
-      pi = network_apply(params, obs, carry.legal_actions)
+      _, p1_iset, p2_iset, public_state = self.game.get_info(carry.game_state)
+      obs = jnp.stack((p1_iset, p2_iset), axis=0)
+      
+      public_state = jnp.where(carry.terminal, self.example_timestep.public_state, public_state)
+      obs = jnp.where(carry.terminal, self.example_timestep.obs, obs) 
+      
+      pi = self._jit_get_policy(params, obs, carry.legal_actions)
       random_pi = carry.legal_actions / jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
-      pi = self.config.sampling_epsilon * random_pi + (1 - self.config.sampling_epsilon) * pi
-      # pi = carry.legal_actions / jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
+      pi = self.config.sampling_epsilon * random_pi + (1 - self.config.sampling_epsilon) * pi 
       
       sample_key, action_key = jax.random.split(key)
-      sample_key = jax.random.split(sample_key, (self.config.batch_size, 2))
-      action_key = jax.random.split(action_key, self.config.batch_size)
+      # For each player samples a single action
+      sample_key = jax.random.split(sample_key, 2) 
       
       action, action_oh = vectorized_sample_action(sample_key, pi)
-      next_game_state, terminal, next_rewards, next_legal = vectorized_apply_action(carry.game_state, action_key, turn, action)
+      
+      next_game_state, terminal, next_rewards, next_legal = self.game.apply_action(carry.game_state, action_key, turn, action)
+      
       valid = jnp.ones_like(next_rewards) - carry.terminal
       #TODO: This can likely be done better, couldnt get tree_where to work
       #timestep_legal = jnp.where(valid[..., None, None], carry.legal_actions, self.example_timestep.legal)
@@ -993,7 +986,7 @@ class MuZeroTrain():
       new_carry = SampleTrajectoryCarry(
         game_state = next_game_state,
         terminal = terminal,
-        legal_actions=jnp.where(terminal[:, None, None], self.example_timestep.legal, next_legal)
+        legal_actions=jnp.where(terminal, self.example_timestep.legal, next_legal)
       )
       timestep = TimeStep(
         valid = valid,
@@ -1009,7 +1002,7 @@ class MuZeroTrain():
              init=init_carry,
              xs=(trajectory_key, jnp.arange(max_turns)))
     return timestep
-    
+     
   
   def get_next_rng_key(self):
     self.rng_key, key = jax.random.split(self.rng_key)
@@ -1650,6 +1643,7 @@ class MuZeroTrain():
     if not self.config.train_abstraction:
       return abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers
     abs_grad = []
+    abs_losses = []
     for pl in range(2):
       abstraction_loss, abstraction_grad = self._abstraction_loss(
         abstraction_params[pl], 
@@ -1662,6 +1656,7 @@ class MuZeroTrain():
         timestep.valid)
        
       
+      abs_losses.append(abstraction_loss)
       abs_grad.append(abstraction_grad)
     
     abstraction_params = (*[optimizers.abstraction_optimizer[pl](abstraction_params[pl], abs_grad[pl][0]) for pl in range(2)],)
@@ -1669,7 +1664,7 @@ class MuZeroTrain():
     iset_encoder_params = (*[optimizers.iset_encoder_optimizer[pl](iset_encoder_params[pl], abs_grad[pl][2]) for pl in range(2)],)
     similarity_params = (*[optimizers.similarity_optimizer[pl](similarity_params[pl], abs_grad[pl][3]) for pl in range(2)],)
     
-    return abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers
+    return abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers, abs_losses
     
   def update_mvs_with_transformations(
     self,
@@ -1688,6 +1683,7 @@ class MuZeroTrain():
     if not self.config.train_mvs:
       return mvs_params, mvs_params_target, transformation_params, optimizers
     transform_grad = []
+    losses = []
     for pl in range(2): 
       transformation_loss, transformation_grad = self._transformation_loss(
         transformation_params[pl],
@@ -1700,6 +1696,7 @@ class MuZeroTrain():
         timestep.legal[..., pl, :],
         timestep.valid
       )
+      losses.append(transformation_loss)
       transform_grad.append(transformation_grad)
      
     transformation_params = (*[optimizers.transformation_opitimizer[pl](transformation_params[pl], transform_grad[pl]) for pl in range(2)],)
@@ -1713,11 +1710,11 @@ class MuZeroTrain():
       iset_encoder_params,
       timestep
     )
-    
+    losses.append(mvs_loss)
     mvs_params = optimizers.mvs_optimizer(mvs_params, mvs_grad)
     mvs_params_target = optimizers.mvs_optimizer_target(mvs_params_target, jax.tree.map(lambda a, b: a - b, mvs_params_target, mvs_params))
     
-    return mvs_params, mvs_params_target, transformation_params, optimizers
+    return mvs_params, mvs_params_target, transformation_params, optimizers, losses
   
   def update_legal_actions(
     self,
@@ -1730,6 +1727,7 @@ class MuZeroTrain():
     if not self.config.train_legal_actions:
       return legal_actions_params, optimizers
     legal_actions_grads = []
+    legal_actions_losses = []
     for pl in range(2):
       legal_actions_loss, legal_actions_grad = self._legal_actions_loss(
         legal_actions_params[pl],
@@ -1741,9 +1739,10 @@ class MuZeroTrain():
         timestep.valid
       )
       legal_actions_grads.append(legal_actions_grad)
+      legal_actions_losses.append(legal_actions_loss)
       
     legal_actions_params = (*[optimizers.legal_actions_optimizer[pl](legal_actions_params[pl], legal_actions_grads[pl]) for pl in range(2)],)
-    return legal_actions_params, optimizers
+    return legal_actions_params, optimizers, legal_actions_losses
       
     
   
@@ -1762,7 +1761,7 @@ class MuZeroTrain():
     
     dynamics_params = optimizers.dynamics_optimizer(dynamics_params, dynamics_grad)
     
-    return dynamics_params, optimizers
+    return dynamics_params, optimizers, dynamics_loss
   
   
   @functools.partial(jax.jit, static_argnums=(0,))
@@ -1772,10 +1771,10 @@ class MuZeroTrain():
     optimizers: Optimizers,
     timestep: TimeStep,
     alpha: float,
-    update_net: bool, 
+    update_net: bool
   ):
     
-    expected_params, expected_params_target, optimizers = self.update_expected(
+    expected_params, expected_params_target, optimizers, expected_loss = self.update_expected(
       network_parameters.expected_params,
       network_parameters.expected_params_target,
       network_parameters.rnad_params,
@@ -1793,7 +1792,7 @@ class MuZeroTrain():
     pi_before_train, _, _, _ = vectorized_net_apply(network_parameters.rnad_params, timestep.obs, timestep.legal) 
     
     
-    rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers = self.update_rnad_with_expected(
+    rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers, rnad_loss = self.update_rnad_with_expected(
       network_parameters.rnad_params,
       network_parameters.rnad_params_target,
       network_parameters.rnad_params_prev,
@@ -1834,7 +1833,7 @@ class MuZeroTrain():
       
     
     
-    abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers = self.update_abstraction(
+    abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers, abstraction_loss = self.update_abstraction(
       network_parameters.abstraction_params,
       network_parameters.ps_decoder_params,
       network_parameters.iset_encoder_params,
@@ -1844,7 +1843,7 @@ class MuZeroTrain():
       timestep
     )
     
-    mvs_params, mvs_params_target, transformation_params, optimizers = self.update_mvs_with_transformations(
+    mvs_params, mvs_params_target, transformation_params, optimizers, mvs_loss = self.update_mvs_with_transformations(
       network_parameters.mvs_params,
       network_parameters.mvs_params_target,
       network_parameters.transformation_params,
@@ -1857,7 +1856,7 @@ class MuZeroTrain():
       timestep
     )
     
-    legal_actions_params, optimizers = self.update_legal_actions(
+    legal_actions_params, optimizers, legal_loss = self.update_legal_actions(
       network_parameters.legal_actions_params,
       abstraction_params,
       iset_encoder_params,
@@ -1865,13 +1864,26 @@ class MuZeroTrain():
       timestep
     )
     
-    dynamics_params, optimizers = self.update_dynamics(
+    dynamics_params, optimizers, dynamics_loss = self.update_dynamics(
       network_parameters.dynamics_params,
       abstraction_params,
       iset_encoder_params,
       optimizers,
       timestep)
     
+    logs = {
+      "Expected Loss": expected_loss,
+      "RNaD Loss": rnad_loss,
+      "P1 Abstraction Loss": abstraction_loss[0],
+      "P2 Abstraction Loss": abstraction_loss[1],
+      "P1 Transformation Loss": mvs_loss[0],
+      "P2 Transformation Loss": mvs_loss[1],
+      "MVS Loss": mvs_loss[2],
+      "P1 Legal Actions Loss": legal_loss[0],
+      "P2 Legal Actions Loss": legal_loss[1],
+      "Dynamics Loss": dynamics_loss
+      
+    }
     
     return NetworkParameters(
       rnad_params=rnad_params,
@@ -1889,13 +1901,13 @@ class MuZeroTrain():
       similarity_params=similarity_params,
       legal_actions_params = legal_actions_params,
       dynamics_params=dynamics_params
-      ), optimizers
+      ), optimizers, logs
   
   def step(self):
     trajectory = self.sample_trajectories()
     alpha, update_regularization = self._entropy_schedule(self.learner_steps)
     
-    self.network_parameters, self.optimizers = self.update_parameters(
+    self.network_parameters, self.optimizers, logs = self.update_parameters(
       self.network_parameters,
       self.optimizers,
       trajectory,
@@ -1907,6 +1919,7 @@ class MuZeroTrain():
     
     self.learner_steps += 1
     
+    
   @functools.partial(jax.jit, static_argnums=(0,))
   def update_jax_parameters(
     self,
@@ -1916,15 +1929,18 @@ class MuZeroTrain():
     alpha,
     update_net, 
   ):
-    trajectory = self.sample_jax_trajectories(network_parameters.rnad_params, key)
-    
+    key = jax.random.split(key, self.config.batch_size)
+    sample_trajectories = jax.vmap(self.sample_trajectory, in_axes=(None, 0), out_axes=1)
+    trajectory = sample_trajectories(network_parameters.rnad_params, key)  
     
     return self.update_parameters(network_parameters, optimizers, lax.stop_gradient(trajectory), alpha, update_net)
+   
+  
   def jax_step(self):
     key = self.get_next_rng_key()
     alpha, update_regularization = self._entropy_schedule(self.learner_steps)
     
-    self.network_parameters, self.optimizers = self.update_jax_parameters(
+    self.network_parameters, self.optimizers, logs = self.update_jax_parameters(
       self.network_parameters,
       self.optimizers,
       key, 
@@ -1932,6 +1948,7 @@ class MuZeroTrain():
       update_regularization)
     
     self.learner_steps +=1
+    
     
   def multiple_jax_steps(self, iter: int):
     for _ in range(iter):
@@ -1964,7 +1981,8 @@ class MuZeroTrain():
         update_net,
         lambda: (rnad_params_target, rnad_params_prev),
         lambda: (rnad_params_prev, rnad_params_prev_))
-    return rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers  
+     
+    return rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers, rnad_loss
     
   def compute_q_values_from_expected(
     self,
@@ -2089,7 +2107,9 @@ class MuZeroTrain():
     expected_params_target = optimizers.expected_optimizer_target(
         expected_params_target, jax.tree.map(lambda a, b: a - b, expected_params_target, expected_params))
     
-    return expected_params, expected_params_target, optimizers
+    logs = {"Expected_loss": expected_loss}
+    
+    return expected_params, expected_params_target, optimizers, logs
     
   def expected_v_trace(self,
                        v: chex.Array,
@@ -2405,7 +2425,7 @@ from open_spiel.python.algorithms.best_response import BestResponsePolicy
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxGoofspiel
 
 def main():
-  cards = 3
+  cards = 5
   points_order = "descending"
   
   # params = {"num_cards": 5, "num_turns": 3, "first_round": 0}
@@ -2422,7 +2442,7 @@ def main():
   # game = orig_game 
   mu = True
   if mu == True:
-    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=32, trajectory_max=cards, use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,), dynamics_type="public_state", similarity_metric="legal_actions"))
+    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=128, trajectory_max=cards - 1, use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,), dynamics_type="public_state", similarity_metric="legal_actions"))
     # muzero.rng_key = jax.random.PRNGKey(42)
   else:
     params = [(n, p) for n, p in params.items()]
@@ -2431,9 +2451,9 @@ def main():
   
   # profiler = Profiler()
   # profiler.start()
-  with chex.fake_jit():
-    for _ in range(1000):
-      muzero.jax_step()
+  # with chex.fake_jit():
+  for _ in range(2000):
+    muzero.jax_step()
   print("Trained")
      
   # goofspiel_compare_learned_trees(muzero, game, orig_game)
