@@ -1935,6 +1935,21 @@ class MuZeroTrain():
     
     return self.update_parameters(network_parameters, optimizers, lax.stop_gradient(trajectory), alpha, update_net)
    
+  @functools.partial(jax.jit, static_argnums=(0, 4))
+  def get_loss_value(
+    self,
+    network_parameters: NetworkParameters,
+    optimizers: Optimizers,
+    key: chex.Array,
+    batch_size: int,
+  ):
+    key = jax.random.split(key, batch_size)
+    sample_trajectories = jax.vmap(self.sample_trajectory, in_axes=(None, 0), out_axes=1)
+    trajectory = sample_trajectories(network_parameters.rnad_params, key)  
+    
+    _, _, logs = self.update_parameters(network_parameters, optimizers, lax.stop_gradient(trajectory), 1.0, False)
+    return logs
+
   
   def jax_step(self):
     key = self.get_next_rng_key()
@@ -2451,9 +2466,9 @@ def main():
   
   # profiler = Profiler()
   # profiler.start()
-  # with chex.fake_jit():
-  for _ in range(2000):
-    muzero.jax_step()
+  with chex.fake_jit():
+    for _ in range(2000):
+      muzero.jax_step()
   print("Trained")
      
   # goofspiel_compare_learned_trees(muzero, game, orig_game)
