@@ -195,23 +195,38 @@ class MuZeroCFR:
   # TODO: Could we remove some bin counts?
   @functools.partial(jax.jit, static_argnums=(0, 5))
   def jit_step(self, regrets, averages, cf_values, average_policy_update_coefficient, player, iteration):
-    
     current_strategies = [[self.regret_matching(regrets[d][pl], self.constants.depth_iset_legal[d][pl]) for pl in range(self.players)] for d in range(self.constants.max_depth)]
   
     history_reaches = [self.constants.init_reaches]
-    history_strategies = [jnp.stack([current_strategies[d][pl][self.constants.depth_history_iset[d][pl]] for pl in range(self.players)], axis=0) for d in range(self.constants.max_depth)]
+    # history_strategies = [jnp.stack([current_strategies[d][pl][self.constants.depth_history_iset[d][pl]] for pl in range(self.players)], axis=0) for d in range(self.constants.max_depth)]
     
+    history_strategies = []
+    # We allow different legal actions in different histories, even if they are in the same infoset.
+    for d in range(self.constants.max_depth):
+      p1_legals = jnp.sum(self.constants.depth_history_legal[d], -1) > 0
+      p2_legals = jnp.sum(self.constants.depth_history_legal[d], -2) > 0
+
+      p1_strategy = current_strategies[d][0][self.constants.depth_history_iset[d][0]] * p1_legals
+      p2_strategy = current_strategies[d][1][self.constants.depth_history_iset[d][1]] * p2_legals
+      
+      strategies = jnp.stack([p1_strategy, p2_strategy], axis=0)
+      
+      strategies = jnp.where(jnp.sum(strategies, axis=-1, keepdims=True) > 1e-8, strategies / jnp.sum(strategies, axis=-1, keepdims=True), 1.0 / strategies.shape[-1])
+      history_strategies.append(strategies)
     
     for d in range(self.constants.max_depth):
       strategy_realization = history_reaches[d][..., None] * history_strategies[d]
       
+      strategy_realization_non_masked = history_reaches[d][..., None] * jnp.stack([current_strategies[d][pl][self.constants.depth_history_iset[d][pl]] for pl in range(self.players)], axis=0)
+      
+      
       # TODO: This is dumb 
       if player != 1:
-        p1_iset_realizations = jnp.bincount(self.constants.depth_history_actions[d][0].ravel(), strategy_realization[0].ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][0].shape[0]).reshape(averages[d][0].shape)
+        p1_iset_realizations = jnp.bincount(self.constants.depth_history_actions[d][0].ravel(), strategy_realization_non_masked[0].ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][0].shape[0]).reshape(averages[d][0].shape)
         averages[d][0] = averages[d][0] + p1_iset_realizations * average_policy_update_coefficient
         
       if player != 0:
-        p2_iset_realizations = jnp.bincount(self.constants.depth_history_actions[d][1].ravel(), strategy_realization[1].ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][1].shape[0]).reshape(averages[d][1].shape) 
+        p2_iset_realizations = jnp.bincount(self.constants.depth_history_actions[d][1].ravel(), strategy_realization_non_masked[1].ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][1].shape[0]).reshape(averages[d][1].shape) 
         averages[d][1] = averages[d][1] + p2_iset_realizations * average_policy_update_coefficient
       
       # We do not compute the next history, since there is none
@@ -243,6 +258,10 @@ class MuZeroCFR:
       if player != 1:
         p1_value = jnp.sum(action_value * history_strategies[d][1, :, None, ...], axis=-1)
         p1_cf_regret = (p1_value - history_value[..., None]) * jnp.expand_dims(history_reaches[d][1], -1)
+        
+        p1_legals = jnp.sum(self.constants.depth_history_legal[d], -1) > 0
+        p1_cf_regret = p1_cf_regret * p1_legals
+        
         p1_bin_regrets = jnp.bincount(self.constants.depth_history_actions[d][0].ravel(), p1_cf_regret.ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][0].shape[0]).reshape(regrets[d][0].shape) * self.constants.depth_iset_legal[d][0]
         
         cf_value = history_value[..., None] * jnp.expand_dims(history_reaches[d][1], -1) 
@@ -258,6 +277,10 @@ class MuZeroCFR:
       if player != 0:
         p2_value = jnp.sum(action_value * history_strategies[d][0,..., None], axis=-2)
         p2_cf_regret = (p2_value - history_value[..., None]) * jnp.expand_dims(history_reaches[d][0], -1)
+        
+        p2_legals = jnp.sum(self.constants.depth_history_legal[d], -2) > 0
+        p2_cf_regret = p2_cf_regret * p2_legals
+        
         p2_bin_regrets = jnp.bincount(self.constants.depth_history_actions[d][1].ravel(), p2_cf_regret.ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][1].shape[0]).reshape(regrets[d][1].shape) * self.constants.depth_iset_legal[d][1]
         
         cf_value = history_value[..., None] * jnp.expand_dims(history_reaches[d][0], -1) 
