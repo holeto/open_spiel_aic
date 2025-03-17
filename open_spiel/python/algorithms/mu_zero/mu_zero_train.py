@@ -2121,10 +2121,9 @@ class MuZeroTrain():
     
     expected_params_target = optimizers.expected_optimizer_target(
         expected_params_target, jax.tree.map(lambda a, b: a - b, expected_params_target, expected_params))
+     
     
-    logs = {"Expected_loss": expected_loss}
-    
-    return expected_params, expected_params_target, optimizers, logs
+    return expected_params, expected_params_target, optimizers, expected_loss
     
   def expected_v_trace(self,
                        v: chex.Array,
