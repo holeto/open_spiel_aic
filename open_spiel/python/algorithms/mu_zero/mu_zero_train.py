@@ -405,6 +405,7 @@ def compute_soft_assignments(cluster_distance: chex.Array, temperature: float, c
   closest = jnp.min(cluster_distance, -1, keepdims=True)
   # nulled_clusters = jnp.where(jnp.logical_and(cluster_distance < cluster_closeness_assignment, cluster_distance > closest + 1e-10), 0, 1)
   soft_assignments = jax.nn.softmax(-cluster_distance * temperature, axis=-1)
+  
   soft_assignments = jnp.where(jnp.logical_and(cluster_distance < cluster_closeness_assignment, cluster_distance > closest + 1e-10), -soft_assignments * repulsive_force, soft_assignments)
   # soft_assignment = _legal_policy(-cluster_distance, nulled_clusters)
   return soft_assignments
@@ -420,11 +421,19 @@ def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: ch
   cluster_distance = cluster_distance ** 0.5
   
   cluster_soft_assignement = compute_soft_assignments(cluster_distance, temperature, cluster_closeness_assignment, repulsive_force)
-    
+  
+  # energy_repulsion = pred  
+  cluster_each_other_distance = pred[..., :, None, :] - pred[..., None, :, :]
+  cluster_each_other_distance = jnp.sum(cluster_each_other_distance ** 2, axis=-1) 
+  
+  cluster_energy_repulsion = jnp.where(cluster_each_other_distance < 1e-8, 0, 1/(cluster_each_other_distance + 1e-9))
+  
+  cluster_energy_repulsion = cluster_energy_repulsion * 0.015
+  cluster_energy_repulsion = jnp.mean(cluster_energy_repulsion)
   
   cluster_loss = jnp.mean(cluster_difference ** 2, axis=-1)
   cluster_loss = jnp.sum(cluster_loss * cluster_soft_assignement, axis=-1) * valid
-  return jnp.mean(cluster_loss), cluster_soft_assignement
+  return jnp.mean(cluster_loss) + cluster_energy_repulsion, cluster_soft_assignement
   
 def _compute_soft_kmeans_loss_with_single(real: chex.Array, pred: chex.Array, probs: chex.Array, valid: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float):
   cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred, valid, temperature, cluster_closeness_assignment, repulsive_force)
