@@ -1,6 +1,6 @@
 
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame, JaxPolicy
-from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFR, MuZeroCFRConstants
+from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFR, MuZeroCFRConstants 
 from open_spiel.python.algorithms.mu_zero.experiments.utils import stringify
 from open_spiel.python.algorithms.mu_zero.mu_zero_gameplay import convert_depth_to_jax, convert_player_depth_to_jax
 
@@ -393,10 +393,12 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
     for p1_map_iset_id, p1_map_iset in enumerate(depth_iset_map[depth][0]):
       if np.all(p1_map_iset == p1_iset):
         p1_iset_id = p1_map_iset_id
+        depth_iset_legal[depth][0][p1_iset_id] = np.logical_or(legal_actions[0], depth_iset_legal[depth][0][p1_iset_id])
         break
     for p2_map_iset_id, p2_map_iset in enumerate(depth_iset_map[depth][1]):
       if np.all(p2_map_iset == p2_iset):
         p2_iset_id = p2_map_iset_id
+        depth_iset_legal[depth][1][p2_iset_id] = np.logical_or(legal_actions[1], depth_iset_legal[depth][1][p2_iset_id])
         break
       
     if p1_iset_id == len(depth_iset_map[depth][0]):
@@ -439,8 +441,7 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
         depth_history_next_history[depth][-1][a1i, a2i] = next_history_id
         _traverse_tree(new_game_state, new_legals, next_key, depth + 1)
 
-  
-  
+   
   _traverse_tree(game_state, legals, state_key)
   # print(depth_iset_map)
   constants = MuZeroCFRConstants(
@@ -462,7 +463,6 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
   )
   
   return  MuZeroCFR(constants)
-   
   
 def nash_equilibrium_jax_game(game: JaxGame, iterations: int=4000) -> tuple[MuZeroCFR, JaxPolicy, float]:
   
