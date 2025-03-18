@@ -206,12 +206,14 @@ class MuZeroCFR:
       p1_legals = jnp.sum(self.constants.depth_history_legal[d], -1) > 0
       p2_legals = jnp.sum(self.constants.depth_history_legal[d], -2) > 0
 
-      p1_strategy = current_strategies[d][0][self.constants.depth_history_iset[d][0]] * p1_legals
-      p2_strategy = current_strategies[d][1][self.constants.depth_history_iset[d][1]] * p2_legals
+      p1_strategy = current_strategies[d][0][self.constants.depth_history_iset[d][0]]
+      p2_strategy = current_strategies[d][1][self.constants.depth_history_iset[d][1]]
       
+      legals = jnp.stack([p1_legals, p2_legals], axis=0)
       strategies = jnp.stack([p1_strategy, p2_strategy], axis=0)
+      strategies = strategies * legals
       
-      strategies = jnp.where(jnp.sum(strategies, axis=-1, keepdims=True) > 1e-8, strategies / jnp.sum(strategies, axis=-1, keepdims=True), 1.0 / strategies.shape[-1])
+      strategies = jnp.where(jnp.sum(strategies, axis=-1, keepdims=True) > 1e-8, strategies / jnp.sum(strategies, axis=-1, keepdims=True), legals / jnp.sum(legals, axis=-1, keepdims=True))
       history_strategies.append(strategies)
     
     for d in range(self.constants.max_depth):
@@ -220,6 +222,7 @@ class MuZeroCFR:
       strategy_realization_non_masked = history_reaches[d][..., None] * jnp.stack([current_strategies[d][pl][self.constants.depth_history_iset[d][pl]] for pl in range(self.players)], axis=0)
       
       
+      # TODO: Is it tokay to use the strategy realiztions without renormalizing?
       # TODO: This is dumb 
       if player != 1:
         p1_iset_realizations = jnp.bincount(self.constants.depth_history_actions[d][0].ravel(), strategy_realization_non_masked[0].ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][0].shape[0]).reshape(averages[d][0].shape)
