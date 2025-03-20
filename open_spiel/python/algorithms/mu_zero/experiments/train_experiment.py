@@ -69,3 +69,18 @@ def train(args, game, trajectory_max, save_folder):
     save_model(file_name, train_algorithm)
     train_algorithm.multiple_jax_steps(args.save_each)
     
+    
+def continue_training(train_algorithm: MuZeroTrain, save_folder: str, save_each:int,  first_iteration: int, iterations: int):
+  
+  if not os.path.exists(save_folder):
+    os.makedirs(save_folder)
+  
+  # We add +1 to first iteration to ensure the old model is not rewritten.
+  for iteration in range(first_iteration + 1, first_iteration + iterations + 2):
+    file_name = save_folder + "muzero_" + str(iteration) + ".pkl" 
+    print("Saving iteration", iteration, flush=True)
+    save_model(file_name, train_algorithm)
+    train_algorithm.multiple_jax_steps(save_each)
+    
+  
+  

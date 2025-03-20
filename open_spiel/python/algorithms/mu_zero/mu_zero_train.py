@@ -1650,7 +1650,7 @@ class MuZeroTrain():
     timestep: TimeStep,
   ):
     if not self.config.train_abstraction:
-      return abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers
+      return abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers, [0.0, 0.0]
     abs_grad = []
     abs_losses = []
     for pl in range(2):
@@ -1690,7 +1690,7 @@ class MuZeroTrain():
     
   ):
     if not self.config.train_mvs:
-      return mvs_params, mvs_params_target, transformation_params, optimizers
+      return mvs_params, mvs_params_target, transformation_params, optimizers, [0.0, 0.0, 0.0]
     transform_grad = []
     losses = []
     for pl in range(2): 
@@ -1734,7 +1734,7 @@ class MuZeroTrain():
     timestep: TimeStep
   ):
     if not self.config.train_legal_actions:
-      return legal_actions_params, optimizers
+      return legal_actions_params, optimizers, [0.0, 0.0]
     legal_actions_grads = []
     legal_actions_losses = []
     for pl in range(2):
@@ -1764,7 +1764,7 @@ class MuZeroTrain():
     timestep: TimeStep
   ):
     if not self.config.train_dynamics:
-      return dynamics_params, optimizers
+      return dynamics_params, optimizers, 0.0
     
     dynamics_loss, dynamics_grad = self._dynamics_loss(dynamics_params, abstraction_params, iset_encoder_params, timestep)
     
@@ -1993,7 +1993,7 @@ class MuZeroTrain():
     update_net: bool
   ):
     if not self.config.train_rnad:
-      return rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers  
+      return rnad_params, rnad_params_target, rnad_params_prev, rnad_params_prev_, optimizers, 0.0
     rnad_loss, rnad_grad = self._rnad_with_expected_loss(rnad_params, rnad_params_prev, rnad_params_prev_,  expected_params_target, timestep, alpha)
     
     rnad_params = optimizers.rnad_optimizer(rnad_params, rnad_grad)
@@ -2123,7 +2123,7 @@ class MuZeroTrain():
     alpha: float
   ):
     if not self.config.train_rnad:
-      return expected_params, expected_params_target, optimizers
+      return expected_params, expected_params_target, optimizers, 0.0
     expected_loss, expected_grad = self._expected_loss(expected_params, expected_params_target, rnad_params, rnad_params_prev, rnad_params_prev_, timestep, alpha)
     
     expected_params = optimizers.expected_optimizer(expected_params, expected_grad)
