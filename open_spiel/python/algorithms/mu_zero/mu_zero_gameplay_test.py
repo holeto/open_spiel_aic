@@ -42,10 +42,6 @@ def run_game(runs, player, muzero_gameplay, game, steps = 100):
   opp = 1 - player
   dummy_key = jax.random.key(0)
   
-  
-  #jax.config.update("jax_debug_nans", True)
-  #jax.config.update("jax_disable_jit", True)
-
   for i in range(runs):
     game_state, legals = game.initialize_structures(dummy_key)
     opp_legals = legals[opp]
@@ -54,6 +50,7 @@ def run_game(runs, player, muzero_gameplay, game, steps = 100):
     turn = 0
     terminal = False
     cur_steps = 0
+    muzero_gameplay.reset()
     while not terminal and cur_steps < steps:
       pl_action = muzero_gameplay.get_action(ps, p1_iset)
       #random opponent
@@ -101,17 +98,17 @@ def goofspiel_test(args):
 
   gp_config =MuZeroGameplayConfig(player=args.player, resolve_iterations= args.resolve_iterations)
   profiler = Profiler()
-  # muzero_gameplay = MuZeroConstantsGameplay(muzero, gp_config)
-  # profiler.start()
-  # run_game(args.runs, args.player, muzero_gameplay, muzero.game)
-  # profiler.stop()
-  # print(profiler.output_text(unicode=True))
-  
-  muzero_gameplay = MuZeroGameplay(muzero, gp_config)
+  muzero_gameplay = MuZeroConstantsGameplay(muzero, gp_config)
   profiler.start()
   run_game(args.runs, args.player, muzero_gameplay, muzero.game)
   profiler.stop()
   print(profiler.output_text(unicode=True))
+  
+  # muzero_gameplay = MuZeroGameplay(muzero, gp_config)
+  # profiler.start()
+  # run_game(args.runs, args.player, muzero_gameplay, muzero.game)
+  # profiler.stop()
+  # print(profiler.output_text(unicode=True))
 
 
 def loaded_test(cards):

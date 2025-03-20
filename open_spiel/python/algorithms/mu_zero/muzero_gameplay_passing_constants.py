@@ -13,13 +13,14 @@ from open_spiel.python.algorithms.mu_zero.mu_zero_gameplay import MuZeroGameplay
 from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFRConstants, MuZeroCFR, check_iset_similarity
 
 
-def find_next_root(cfr: MuZeroCFR, tree_depth: int, player: int, public_state, iset, constants: MuZeroCFRConstants, max_ps_size =-1):
+
+def find_next_root(cfr: MuZeroCFR, tree_depth: int, player: int, public_state, iset, max_ps_size =-1):
   opponent = 1 - player
   public_state_histories = cfr.find_public_state_from_iset(iset, player, tree_depth)
   history_reaches = cfr.find_reaches_from_average()[tree_depth][:, public_state_histories]
   # TODO: Use numpy or jax.numpy?
   next_reaches = jnp.where(jnp.array([[player == 0], [player == 1]]), history_reaches, 1.0)
-  next_isets_id = constants.depth_history_iset[tree_depth][:, public_state_histories]
+  next_isets_id = cfr.constants.depth_history_iset[tree_depth][:, public_state_histories]
   next_cf_values = cfr.cf_values[tree_depth][opponent][next_isets_id[opponent]]
   #If a max_ps_size is given, pad
   # the public state to that size with invalid data
@@ -285,7 +286,6 @@ class MuZeroConstantsGameplay:
     self.initialize_isets() 
     
     self.cfr = None
-    self.constants = None
     self.tree_depth = 0
     self.policy = {}
     
@@ -327,7 +327,7 @@ class MuZeroConstantsGameplay:
    
    
   def find_next_root(self, public_state, iset):
-    return find_next_root(self.cfr, self.tree_depth, self.config.player, public_state, iset, self.constants, self.max_ps_size)
+    return find_next_root(self.cfr, self.tree_depth, self.config.player, public_state, iset, self.max_ps_size)
 
   
   def find_root_from_previous(self, public_state, iset):
@@ -366,15 +366,15 @@ class MuZeroConstantsGameplay:
   
   
   def prepare_cfr_structure(self, isets, reaches, cf_values, construct_gadget, valid):
-    self.constants, depth_iset_map = prepare_cfr_structure(self.muzero, self.config.player, self.config.depth_limit, isets, reaches, cf_values, construct_gadget, valid)
+    constants, depth_iset_map = prepare_cfr_structure(self.muzero, self.config.player, self.config.depth_limit, isets, reaches, cf_values, construct_gadget, valid)
     if self.cfr is None:
       print("Creating new CFR")
-      self.cfr = MuZeroCFR(self.constants, depth_iset_map)
+      self.cfr = MuZeroCFR(constants, depth_iset_map)
     else:
-      self.cfr.reset(self.constants, depth_iset_map)
+      self.cfr.reset(constants, depth_iset_map)
 
   def run_cfr(self):
-    self.cfr.multiple_steps_given_constants(self.config.resolve_iterations, self.constants)
+    self.cfr.multiple_steps_given_constants(self.config.resolve_iterations, self.cfr.constants)
 
   def get_policy(self, iset):
     depth_limit = self.config.depth_limit + self.constructed_gadget
@@ -414,7 +414,7 @@ class MuZeroConstantsGameplay:
     self.run_cfr()
     
     policy = self.get_policy(abstracted_iset)
-    #print("Policy: ", policy)
+    print("Policy: ", policy)
     
     return np.random.choice(self.actions, p=policy)
   
