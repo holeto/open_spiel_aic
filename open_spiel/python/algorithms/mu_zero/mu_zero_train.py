@@ -1597,7 +1597,8 @@ class MuZeroTrain():
     normalization = jnp.sum(timestep.valid)
     
     ps_loss = (lax.stop_gradient(real_ps) - next_ps) * non_terminal[..., None]
-    ps_loss = jnp.sum(ps_loss ** 2) / (dynamics_normalization + (dynamics_normalization == 0))
+    
+    ps_loss = jnp.sum(jnp.mean(ps_loss ** 2, -1)) / (dynamics_normalization + (dynamics_normalization == 0))
     
     p1_iset_loss = optax.softmax_cross_entropy_with_integer_labels(next_p1_dist, lax.stop_gradient(real_p1_iset_id)) * non_terminal
     p2_iset_loss = optax.softmax_cross_entropy_with_integer_labels(next_p2_dist, lax.stop_gradient(real_p2_iset_id)) * non_terminal
@@ -1612,7 +1613,7 @@ class MuZeroTrain():
     terminal_loss = jnp.sum(terminal_loss) / (normalization + (normalization == 0))
     
     # return reward_loss + terminal_loss
-    return ps_loss + 3 * ( p1_iset_loss + p2_iset_loss + reward_loss +  terminal_loss )
+    return ps_loss + p1_iset_loss + p2_iset_loss + reward_loss +  terminal_loss
       
       
   def update_rnad(

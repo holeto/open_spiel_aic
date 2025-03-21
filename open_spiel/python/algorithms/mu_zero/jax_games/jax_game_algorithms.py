@@ -269,6 +269,8 @@ def expected_value_jax_game(game: JaxGame, policy: JaxPolicy):
           game_state, action_key, depth, np.array([a1i, a2i]))
         
         curr_state_value += p1_policy[a1i] * p2_policy[a2i] * new_rewards
+      
+        
         if new_terminal:
           continue
           
@@ -360,6 +362,7 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
 
   depth_history_next_history = [] # Int[D, H(D), A1, A2]
 
+  depth_iset_dict = []
 
   def _traverse_tree(game_state, legal_actions, key, depth=0):
     
@@ -379,6 +382,7 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
     
     
     if len(depth_iset_map) <= depth:
+      depth_iset_dict.append([{}, {}])
       depth_iset_map.append([[], []])
       depth_iset_legal.append([[], []])
       depth_history_action_utility.append([])
@@ -390,13 +394,33 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
       
     p1_iset_id = len(depth_iset_map[depth][0])
     p2_iset_id = len(depth_iset_map[depth][1])
+    
+    # TODO: You need to stringify the iset again if you want to use this
+    # if p1_iset_str not in depth_iset_dict[depth][0]:
+    #   depth_iset_dict[depth][0][p1_iset_str] = p1_iset_id
+    #   depth_iset_map[depth][0].append(p1_iset)
+    #   depth_iset_legal[depth][0].append(legal_actions[0])
+    # else: 
+    #   p1_iset_id = depth_iset_dict[depth][0][p1_iset_str]
+    #   depth_iset_legal[depth][0][p1_iset_id] = np.logical_or(legal_actions[0], depth_iset_legal[depth][0][p1_iset_id])
+      
+    # if p2_iset_str not in depth_iset_dict[depth][1]:
+    #   depth_iset_dict[depth][1][p2_iset_str] = p2_iset_id
+    #   depth_iset_map[depth][1].append(p2_iset)
+    #   depth_iset_legal[depth][1].append(legal_actions[1])
+    # else:
+    #   p2_iset_id = depth_iset_dict[depth][1][p2_iset_str]
+    #   depth_iset_legal[depth][1][p2_iset_id] = np.logical_or(legal_actions[1], depth_iset_legal[depth][1][p2_iset_id])
+      
     for p1_map_iset_id, p1_map_iset in enumerate(depth_iset_map[depth][0]):
-      if np.all(p1_map_iset == p1_iset):
+      if np.sum(np.abs(p1_map_iset - p1_iset)) < 1e-8:
+      # if np.all(p1_map_iset == p1_iset):
         p1_iset_id = p1_map_iset_id
         depth_iset_legal[depth][0][p1_iset_id] = np.logical_or(legal_actions[0], depth_iset_legal[depth][0][p1_iset_id])
         break
     for p2_map_iset_id, p2_map_iset in enumerate(depth_iset_map[depth][1]):
-      if np.all(p2_map_iset == p2_iset):
+      if np.sum(np.abs(p2_map_iset - p2_iset)) < 1e-8:
+      # if np.all(p2_map_iset == p2_iset):
         p2_iset_id = p2_map_iset_id
         depth_iset_legal[depth][1][p2_iset_id] = np.logical_or(legal_actions[1], depth_iset_legal[depth][1][p2_iset_id])
         break
@@ -428,10 +452,12 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
           continue
         next_key, action_key = jax.random.split(key)
         new_game_state, new_terminal, new_rewards, new_legals = game.apply_action(
-            game_state, action_key, depth, np.array([a1i, a2i]))
+            game_state, action_key, depth, jnp.array([a1i, a2i]))
+
+        new_rewards = float(new_rewards)
+        new_terminal = bool(new_terminal)
 
         depth_history_action_utility[depth][-1][a1i, a2i] = new_rewards
-        
         
         if new_terminal:
           continue 
@@ -439,9 +465,11 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
         if len(depth_history_iset) > depth + 1:
           next_history_id = len(depth_history_iset[depth+1][0])
         depth_history_next_history[depth][-1][a1i, a2i] = next_history_id
+        
+        new_legals = np.array(new_legals)
         _traverse_tree(new_game_state, new_legals, next_key, depth + 1)
 
-   
+  legals = np.array(legals)
   _traverse_tree(game_state, legals, state_key)
   # print(depth_iset_map)
   constants = MuZeroCFRConstants(
@@ -463,6 +491,14 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
   )
   
   return  MuZeroCFR(constants)
+
+def nash_equilibrium_cluster_game(game: JaxGame, iterations: int = 1000, custom_map: dict = {}): 
+  
+  cfr = prepare_cfr_from_game(game, custom_map) 
+  cfr.multiple_steps(iterations)
+  dict_nash = extract_policy_from_cfr(game, cfr, custom_map)
+  return dict_nash
+  
   
 def nash_equilibrium_jax_game(game: JaxGame, iterations: int=4000) -> tuple[MuZeroCFR, JaxPolicy, float]:
   

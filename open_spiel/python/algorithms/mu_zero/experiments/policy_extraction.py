@@ -1,14 +1,15 @@
 import numpy as np
 import jax
+import jax.numpy as jnp
 
 import pyspiel
 
 from open_spiel.python.algorithms.mu_zero.mu_zero_gameplay import prepare_cfr_structure, find_next_root
 from open_spiel.python.algorithms.mu_zero.experiments.utils import stringify
 from open_spiel.python.algorithms.mu_zero.mu_zero_train import MuZeroTrain
-from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFR
+from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFR, MuZeroCFRConstants
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame, JaxPolicy
-from open_spiel.python.algorithms.mu_zero.jax_games.jax_game_algorithms import prepare_cfr_from_game, extract_policy_from_cfr
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_game_algorithms import prepare_cfr_from_game, extract_policy_from_cfr, nash_equilibrium_cluster_game
 
 
 def find_imm_next_isets(game: JaxGame, infos, key, depth: int, player: int):
@@ -39,7 +40,7 @@ def find_imm_next_isets(game: JaxGame, infos, key, depth: int, player: int):
         next_infos[stringify(iset)].append(new_info)
         # next_states.append(new_info)
   return isets, next_infos
-  
+   
 
 def solve_game_each_infoset(model: MuZeroTrain, depth_limit: int, resolve_iterations: int) -> dict[str, list[float]]:
   '''Constructs the depth-limited game from each infoset in the game. It traverses the game tree in BFS fashion, so you have cf-values and reaches for each subgame.'''
@@ -125,7 +126,9 @@ def solve_game_full(model: MuZeroTrain, resolve_iterations: int = 1000) -> dict[
   cfr = prepare_cfr_structure(model, 0, model.config.trajectory_max, init_iset, init_reaches, init_cf_values, False)  
   
   cfr.multiple_steps(resolve_iterations)  
+   
   policy = JaxPolicy()
+  
   
   # TODO: Is this okay? I think this should just go through the game tree within the CFR structures and take it from there.
   #   Right now it just maps the original game to the abstraction and uses that.
@@ -188,15 +191,147 @@ def solve_game_full_no_dynamics(model: MuZeroTrain, resolve_iterations: int = 10
         
   _traverse_game(game_state, state_key, legals)
   
-  cfr = prepare_cfr_from_game(game, cluster_map)
-  cfr.multiple_steps(resolve_iterations)
-  policy = extract_policy_from_cfr(game, cfr, cluster_map)
+  policy = nash_equilibrium_cluster_game(game, resolve_iterations, cluster_map) 
   
   return policy
 
 
+def solve_game_full_trained_dynamics(model: MuZeroTrain, resolve_iterations: int = 1000) -> JaxPolicy:
+  
+  '''Constructs the original game but use trained abstraction and then solves it.'''
+  game = model.game 
+  
+  #can be arbitrary seed, as this game does not have chance nodes
+  key = jax.random.key(0)
+  state_key, init_key = jax.random.split(key)
+  game_state, legals = game.initialize_structures(init_key) 
+  
+  cluster_map = {}
+  def _traverse_game(game_state, p1_abstracted, p2_abstracted, key, legals, depth=0): 
+    _, p1_iset, p2_iset, ps = game.get_info(game_state)
+    p1_iset = np.array(p1_iset)
+    p2_iset = np.array(p2_iset)
+     
+    cluster_map[stringify(p1_iset)] = np.concatenate((ps, p1_abstracted))
+    cluster_map[stringify(p2_iset)] = np.concatenate((ps, p2_abstracted))
+    for a1i, a1 in enumerate(legals[0]):
+      if a1 < 0.5:
+        continue
+      for a2i, a2 in enumerate(legals[1]):
+        if a2 < 0.5:
+          continue
+        
+        
+        next_key, action_key = jax.random.split(key)
+        new_game_state, terminal, rewards, new_legals = game.apply_action(game_state, action_key, depth, np.array([a1i, a2i]))
+         
+        next_p1_isets, next_p2_isets, next_utilities, next_terminal = model.get_next_state_from_abstraction(p1_abstracted, p2_abstracted, a1i, a2i) 
+        
+        if terminal:
+          continue
+        _traverse_game(new_game_state, next_p1_isets, next_p2_isets, next_key, new_legals, depth + 1)
+        
+        
+  _, p1_iset, p2_iset, ps = game.get_info(game_state)
+  p1_abstracted, p2_abstracted = model.get_both_abstraction(ps, p1_iset, p2_iset) 
+  
+  _traverse_game(game_state, p1_abstracted, p2_abstracted, state_key, legals)
+  
+  policy = nash_equilibrium_cluster_game(game, resolve_iterations, cluster_map) 
+  
+  return policy
 
 
+def solve_game_replace_legals(model: MuZeroTrain, resolve_iterations: int = 1000, use_dynamics: bool = False) -> JaxPolicy:
+  '''This only makes some legals illegal, the other way around is much more difficult, because you would have some actions that lead to terminal that gives 0 and that would probably break the game.'''
+  game = model.game 
+  
+  #can be arbitrary seed, as this game does not have chance nodes
+  key = jax.random.key(0)
+  state_key, init_key = jax.random.split(key)
+  game_state, legals = game.initialize_structures(init_key) 
+  
+  cfr = prepare_cfr_from_game(game)
+  
+  iset_legals = [[np.array(pl) for pl in depth] for depth in cfr.constants.depth_iset_legal]
+  
+  cluster_map = {}
+  legal_actions = []
+  
+  legal_epsilon = 0.0003
+  
+  def _traverse_game(game_state, p1_abstracted, p2_abstracted, key, legals, depth=0): 
+    
+    if len(legal_actions) <= depth:
+      legal_actions.append([])
+    
+     
+    _, p1_iset, p2_iset, ps = game.get_info(game_state)
+    
+    if use_dynamics:
+      p1_legal_logits, p2_legal_logits = model.get_both_legal_actions_from_abstraction(p1_abstracted, p2_abstracted)
+    else:
+      p1_legal_logits, p2_legal_logits = model.get_both_legal_actions(ps, p1_iset, p2_iset)
+    
+    p1_legal = jax.nn.sigmoid(p1_legal_logits) > legal_epsilon 
+    p2_legal = jax.nn.sigmoid(p2_legal_logits) > legal_epsilon
+     
+    # assert np.all(iset_legals[depth][0][cfr.constants.depth_history_iset[depth][0][len(legal_actions[depth])]] >= p1_legal)
+    # assert np.all(iset_legals[depth][1][cfr.constants.depth_history_iset[depth][1][len(legal_actions[depth])]] >= p2_legal)
+    
+    
+    history_both_legals = p1_legal[..., None] * p2_legal[None, ...]  
+    
+    history_both_legals = np.where(history_both_legals + cfr.constants.depth_history_legal[depth][len(legal_actions[depth])] > 1.5, 1, 0)
+    
+    legal_actions[depth].append(history_both_legals)
+    
+  
+    for a1i, a1 in enumerate(legals[0]):
+      if a1 < 0.5:
+        continue
+      for a2i, a2 in enumerate(legals[1]):
+        if a2 < 0.5:
+          continue
+        
+        
+        
+        
+        next_key, action_key = jax.random.split(key)
+        new_game_state, terminal, rewards, new_legals = game.apply_action(game_state, action_key, depth, np.array([a1i, a2i]))
+         
+        next_p1_isets, next_p2_isets, next_utilities, next_terminal = model.get_next_state_from_abstraction(p1_abstracted, p2_abstracted, a1i, a2i) 
+        
+        if terminal:
+          continue
+        _traverse_game(new_game_state, next_p1_isets, next_p2_isets, next_key, new_legals, depth + 1)
+  
+  _, p1_iset, p2_iset, ps = game.get_info(game_state)
+  p1_abstracted, p2_abstracted = model.get_both_abstraction(ps, p1_iset, p2_iset)
+  _traverse_game(game_state, p1_abstracted, p2_abstracted, state_key, legals)
+  
+  legal_actions = [jnp.array(la) for la in legal_actions]
+  
+  
+  constants = MuZeroCFRConstants(
+    max_depth = cfr.constants.max_depth,
+    resolving_player = cfr.constants.resolving_player,
+    init_reaches = cfr.constants.init_reaches,
+    depth_actions = cfr.constants.depth_actions,
+    depth_iset_map = cfr.constants.depth_iset_map,
+    depth_iset_legal = cfr.constants.depth_iset_legal,
+    depth_history_action_utility = cfr.constants.depth_history_action_utility,
+    depth_history_iset = cfr.constants.depth_history_iset,
+    depth_history_actions = cfr.constants.depth_history_actions,
+    depth_history_legal = legal_actions,
+    depth_history_next_history = cfr.constants.depth_history_next_history
+  )
+  
+  cfr = MuZeroCFR(constants)
+  
+  cfr.multiple_steps(1000)
+  policy = extract_policy_from_cfr(model.game, cfr)
+  return policy
 
 def extract_rnad_policy(model: MuZeroTrain) -> dict[str, list[float]]:
   
