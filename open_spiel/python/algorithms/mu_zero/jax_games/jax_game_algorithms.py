@@ -445,12 +445,9 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
   _traverse_tree(game_state, legals, state_key)
   # print(depth_iset_map)
   constants = MuZeroCFRConstants(
-    max_depth = len(depth_iset_map),
     resolving_player = 0,
     init_reaches = np.ones((2, 1)),
     depth_actions = [a[0][0].shape[0] for a in depth_history_actions],
-    
-    depth_iset_map = convert_player_depth_to_jax(depth_iset_map),
     depth_iset_legal = convert_player_depth_to_jax(depth_iset_legal),
     
     depth_history_action_utility = convert_depth_to_jax(depth_history_action_utility),
@@ -462,7 +459,7 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
 
   )
   
-  return  MuZeroCFR(constants)
+  return  MuZeroCFR(constants, depth_iset_map)
   
 def nash_equilibrium_jax_game(game: JaxGame, iterations: int=4000) -> tuple[MuZeroCFR, JaxPolicy, float]:
   
