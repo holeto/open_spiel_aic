@@ -104,6 +104,7 @@ def exploitability_jax_game(game: JaxGame, policy: JaxPolicy) -> tuple[JaxPolicy
     state_tensor, p1_iset, p2_iset, ps = game.get_info(game_state)
     p1_iset = np.array(p1_iset)
     p2_iset = np.array(p2_iset)
+    legal_actions = np.array(legal_actions)
     
     # ps_str = stringify(ps)
     p1_iset_str = stringify(p1_iset)
@@ -296,6 +297,7 @@ def extract_policy_from_cfr(game: JaxGame, cfr: MuZeroCFR, custom_map: dict = {}
     # ps_str = stringify(ps)
     p1_iset = np.array(p1_iset)
     p2_iset = np.array(p2_iset)
+    legal_actions = np.array(legal_actions)
     p1_iset_str = stringify(p1_iset)
     p2_iset_str = stringify(p2_iset)
     
@@ -319,6 +321,8 @@ def extract_policy_from_cfr(game: JaxGame, cfr: MuZeroCFR, custom_map: dict = {}
     
     
     policy_dict[p1_iset_str] = p1_pol
+    #print(state)
+    #print(policy_dict[p1_iset_str])
     policy_dict[p2_iset_str] = p2_pol
     
     for a1i, a1 in enumerate(legal_actions[0]):
@@ -366,6 +370,7 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
 
   def _traverse_tree(game_state, legal_actions, key, depth=0):
     
+    legal_actions = np.array(legal_actions)
     actions = legal_actions[0].shape[0]
     
     state, p1_iset, p2_iset, ps = game.get_info(game_state)
@@ -471,14 +476,10 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
 
   legals = np.array(legals)
   _traverse_tree(game_state, legals, state_key)
-  # print(depth_iset_map)
   constants = MuZeroCFRConstants(
-    max_depth = len(depth_iset_map),
     resolving_player = 0,
     init_reaches = np.ones((2, 1)),
     depth_actions = [a[0][0].shape[0] for a in depth_history_actions],
-    
-    depth_iset_map = convert_player_depth_to_jax(depth_iset_map),
     depth_iset_legal = convert_player_depth_to_jax(depth_iset_legal),
     
     depth_history_action_utility = convert_depth_to_jax(depth_history_action_utility),
@@ -490,7 +491,8 @@ def prepare_cfr_from_game(game: JaxGame, custom_map: dict = {}) -> MuZeroCFR:
 
   )
   
-  return  MuZeroCFR(constants)
+  return MuZeroCFR(constants, depth_iset_map)
+
 
 def nash_equilibrium_cluster_game(game: JaxGame, iterations: int = 1000, custom_map: dict = {}): 
   
