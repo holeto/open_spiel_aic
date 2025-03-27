@@ -17,23 +17,26 @@ from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFRConstants,
 def find_next_root(cfr: MuZeroCFR, tree_depth: int, player: int, public_state, iset, max_ps_size =-1):
   opponent = 1 - player
   public_state_histories = cfr.find_public_state_from_iset(iset, player, tree_depth)
-  history_reaches = cfr.find_reaches_from_average()[tree_depth][:, public_state_histories]
+  #history_reaches = np.array(cfr.find_reaches_from_average_constants(cfr.constants)[tree_depth][:, public_state_histories])
+  history_reaches = np.array(cfr.last_depth_reaches)[:, public_state_histories]
   # TODO: Use numpy or jax.numpy?
-  next_reaches = jnp.where(jnp.array([[player == 0], [player == 1]]), history_reaches, 1.0)
-  next_isets_id = cfr.constants.depth_history_iset[tree_depth][:, public_state_histories]
-  next_cf_values = cfr.cf_values[tree_depth][opponent][next_isets_id[opponent]]
+  next_reaches = np.where(np.array([[player == 0], [player == 1]]), history_reaches, 1.0)
+  depth_isets = np.array(cfr.constants.depth_history_iset[tree_depth])
+  depth_cf_vals = np.array(cfr.cf_values[tree_depth][opponent])
+  next_isets_id = depth_isets[:, public_state_histories]
+  next_cf_values = depth_cf_vals[next_isets_id[opponent]]
   #If a max_ps_size is given, pad
   # the public state to that size with invalid data
   ps_size = public_state_histories.shape[0]
   #next_isets = cfr.depth_iset_map[tree_depth][opponent][next_isets_id[opponent]]
-  next_isets = jnp.stack([cfr.depth_iset_map[tree_depth][pl][next_isets_id[pl]] for pl in range(2)], axis = 0)
+  next_isets = np.stack([cfr.depth_iset_map[tree_depth][pl][next_isets_id[pl]] for pl in range(2)], axis = 0)
   #It should never be greater, but right now it does give bigger pub states
-  valid = jnp.ones_like(next_cf_values)
+  valid = np.ones_like(next_cf_values)
   if max_ps_size > 0:
     pad_amount = max_ps_size - ps_size
-    next_isets = jnp.pad(next_isets, ((0, 0), (0, pad_amount), (0, 0)), mode='constant', constant_values=0)
-    next_reaches = jnp.pad(next_reaches, ((0, 0), (0, pad_amount)), mode='constant', constant_values=0)
-    next_cf_values = jnp.pad(next_cf_values, ((0, pad_amount)), mode='constant', constant_values=0)
+    next_isets = np.pad(next_isets, ((0, 0), (0, pad_amount), (0, 0)), mode='constant', constant_values=0)
+    next_reaches = np.pad(next_reaches, ((0, 0), (0, pad_amount)), mode='constant', constant_values=0)
+    next_cf_values = np.pad(next_cf_values, ((0, pad_amount)), mode='constant', constant_values=0)
     valid = np.pad(valid, ((0, pad_amount)), mode='constant', constant_values=0)
   return next_isets, next_reaches, next_cf_values, valid
 
@@ -175,9 +178,8 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, depth_limit, isets, 
     # action_utility = legal * (next_utilities[..., 0] - next_utilities[..., 1]) / 2
     
     
-    # From [H(D), A1, A2] should select [H(D + 1)] 
-    # nonzero() returns indices which are non zero in tuple (4-tuple in this case)
-    #nonzeros = non_terminal.nonzero()
+    #Here we dont need to get indices of the next nonterminals
+    # we expand everything
     next_isets = np.stack((next_p1_isets, next_p2_isets), 0)
     next_isets = np.where(non_terminal[None, ..., None].astype(bool), next_isets, 0)
     num_abstraction = next_isets.shape[-1]

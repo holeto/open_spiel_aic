@@ -11,6 +11,7 @@ from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxGoof
 from open_spiel.python.algorithms.mu_zero.mu_zero_train import MuZeroTrain
 from open_spiel.python.algorithms.mu_zero.mu_zero_cfr import MuZeroCFRConstants, MuZeroCFR, check_iset_similarity
 
+
 @chex.dataclass(frozen=True)
 class MuZeroGameplayConfig:
   player: int = 0
@@ -30,13 +31,16 @@ def validate_terminal(terminal, threshold: float = 0.5):
 def find_next_root(cfr: MuZeroCFR, tree_depth: int, player: int, public_state, iset):
   opponent = 1 - player
   public_state_histories = cfr.find_public_state_from_iset(iset, player, tree_depth)
-  history_reaches = cfr.find_reaches_from_average()[tree_depth][:, public_state_histories]
+  #history_reaches = cfr.find_reaches_from_average()[tree_depth][:, public_state_histories]
+  history_reaches = np.asarray(cfr.last_depth_reaches)[:, public_state_histories]
   # TODO: Use numpy or jax.numpy?
-  next_reaches = jnp.where(jnp.array([[player == 0], [player == 1]]), history_reaches, 1.0)
-  next_isets_id = cfr.constants.depth_history_iset[tree_depth][:, public_state_histories]
-  next_cf_values = cfr.cf_values[tree_depth][opponent][next_isets_id[opponent]]
+  next_reaches = np.where(np.array([[player == 0], [player == 1]]), history_reaches, 1.0)
+  depth_isets = np.array(cfr.constants.depth_history_iset[tree_depth])
+  depth_cf_vals = np.array(cfr.cf_values[tree_depth][opponent])
+  next_isets_id = depth_isets[:, public_state_histories]
+  next_cf_values = depth_cf_vals[next_isets_id[opponent]]
   next_isets = cfr.depth_iset_map[tree_depth][opponent][next_isets_id[opponent]]
-  next_isets = jnp.stack([cfr.depth_iset_map[tree_depth][pl][next_isets_id[pl]] for pl in range(2)], axis = 0)
+  next_isets = np.stack([np.array(cfr.depth_iset_map[tree_depth][pl])[next_isets_id[pl]] for pl in range(2)], axis = 0)
   return next_isets, next_reaches, next_cf_values 
 
 
@@ -344,7 +348,7 @@ class MuZeroGameplay:
     self.run_cfr()
     
     policy = self.get_policy(abstracted_iset)
-    #print("Policy: ", policy)
+    print("Policy: ", policy)
     
     return np.random.choice(self.actions, p=policy)
   

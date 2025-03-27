@@ -60,6 +60,7 @@ class MuZeroCFR:
     self.regrets = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0], a)) for pl in range(self.players)] for d, a in enumerate(constants.depth_actions)]
     self.averages = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0], a)) for pl in range(self.players)] for d, a in enumerate(constants.depth_actions)]
     self.cf_values = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0]),) for pl in range(self.players)] for d, _ in enumerate(constants.depth_actions)]
+    self.last_depth_reaches = [[jnp.ones(self.constants.depth_history_iset[d][pl].shape[0],) for pl in range(self.players)] for d, _ in enumerate(constants.depth_actions)]
     self.regret_matching = jax.vmap(regret_matching, in_axes=(0, 0), out_axes=0)
     
   def check_constants(self, constants: MuZeroCFRConstants):
@@ -167,12 +168,12 @@ class MuZeroCFR:
     averaging_coefficient = self.timestep if self._linear_averaging else 1
     if self._alternating_updates:
       for player in range(self.players):
-        self.regrets, self.averages, self.cf_values = self.jit_step_given_constants(constants,
+        self.regrets, self.averages, self.cf_values, self.last_depth_reaches = self.jit_step_given_constants(constants,
             self.regrets, self.averages, self.cf_values, averaging_coefficient, player, self.timestep
         )
 
     else:
-      self.regrets, self.averages, self.cf_values = (
+      self.regrets, self.averages, self.cf_values, self.last_depth_reaches = (
           constants,
           self.regrets,
           self.averages,
@@ -188,12 +189,12 @@ class MuZeroCFR:
     averaging_coefficient = self.timestep if self._linear_averaging else 1
     if self._alternating_updates:
       for player in range(self.players):
-        self.regrets, self.averages, self.cf_values = self.jit_step(
+        self.regrets, self.averages, self.cf_values, self.last_depth_reaches = self.jit_step(
             self.regrets, self.averages, self.cf_values, averaging_coefficient, player, self.timestep
         )
 
     else:
-      self.regrets, self.averages, self.cf_values = self.jit_step(
+      self.regrets, self.averages, self.cf_values, self.last_depth_reaches = self.jit_step(
           self.regrets,
           self.averages,
           self.cf_values,
@@ -257,6 +258,40 @@ class MuZeroCFR:
         average_sum = jnp.sum(self.averages[d][pl], axis= -1, keepdims=True)
         self.averages[d][pl] /= average_sum + (average_sum < 1e-15)
     return self.find_reaches(self.averages)
+  
+  #This can only be called with constants like that,
+  #because for the other version averages have a non
+  # static shape, which would lead to recompilation every time,
+  # further increasing memory requirements and likely slowing it down
+  @functools.partial(jax.jit, static_argnums=(0))
+  @chex.assert_max_traces(n=1)
+  def find_reaches_from_average_constants(self, constants):
+    for d in range(self.max_depth):
+      for pl in range(self.players):
+        average_sum = jnp.sum(self.averages[d][pl], axis= -1, keepdims=True)
+        self.averages[d][pl] /= average_sum + (average_sum < 1e-15)
+    return self.find_reaches_constants(constants, self.averages)
+  
+  @functools.partial(jax.jit, static_argnums=(0))
+  def find_reaches_constants(self, constants, strategies):
+    history_reaches = [self.constants.init_reaches]
+    history_strategies = [jnp.stack([strategies[d][pl][self.constants.depth_history_iset[d][pl]] for pl in range(self.players)], axis=0) for d in range(self.max_depth)]
+    
+    
+    for d in range(self.max_depth - 1):
+      strategy_realization = history_reaches[d][..., None] * history_strategies[d]
+
+      
+      p1_masked_realization = strategy_realization[0, ..., None] * (self.constants.depth_history_next_history[d] >= 0)
+      
+      p2_masked_realization = strategy_realization[1, :, None, ...] * (self.constants.depth_history_next_history[d] >= 0)
+      
+      
+      p1_reaches_next = jnp.bincount(self.constants.depth_history_next_history[d].ravel(), p1_masked_realization.ravel(), length=constants.depth_history_next_history[d+1].shape[0])
+      p2_reaches_next = jnp.bincount(self.constants.depth_history_next_history[d].ravel(), p2_masked_realization.ravel(), length=constants.depth_history_next_history[d+1].shape[0])
+      
+      history_reaches.append(jnp.stack([p1_reaches_next, p2_reaches_next], axis=0))
+    return history_reaches
     
   # TODO: Could this be used in jit_step?
   def find_reaches(self, strategies):
@@ -383,7 +418,7 @@ class MuZeroCFR:
         
         regrets[d][1] = jnp.maximum(regrets[d][1] - p2_bin_regrets, 0.0)
       # history_value = jnp.sum(action_value *)
-    return regrets, averages, cf_values
+    return regrets, averages, cf_values, history_reaches[-1]
 
   @functools.partial(jax.jit, static_argnums=(0, 5))
   def jit_step(self, regrets, averages, cf_values, average_policy_update_coefficient, player, iteration):
@@ -489,4 +524,4 @@ class MuZeroCFR:
       
       
       # history_value = jnp.sum(action_value *)
-    return regrets, averages, cf_values
+    return regrets, averages, cf_values, history_reaches[-1]
