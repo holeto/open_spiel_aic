@@ -170,10 +170,27 @@ def test_nash_equilibrium(board_shape: tuple[int, int], ship_sizes: list[int]):
   print(nash_policy.policy)
   # p1_br, p2_br, jax_p1_exp, jax_p2_exp = exploitability_jax_game(game, nash_policy) 
 
+def verify_shapes():
+  
+  for game_settings in [((2, 2), [2]), ((3, 3), [3, 2]), ((5, 5), [2, 3, 4]), ((5, 3), [3, 3])]:
+    print(*game_settings)
+    game = JaxBattleships(*game_settings)
+    
+    init_state, legals = game.initialize_structures(jax.random.key(0))
+    state, p1_iset, p2_iset, public_state = game.get_info(init_state)
+
+    print(p1_iset.shape[0], game.information_state_tensor_shape())
+    assert p1_iset.shape[0] == game.information_state_tensor_shape()
+    assert p2_iset.shape[0] == game.information_state_tensor_shape()
+    assert public_state.shape[0] == game.public_state_tensor_shape()
+    
+    
+
 if __name__ == "__main__":
   board_shape = (2, 2)
   ship_sizes = [2]
+  verify_shapes()
   # test_state_tensor_uniqueness(board_shape, ship_sizes)
   # test_information_set_consistency(board_shape, ship_sizes)
-  test_nash_equilibrium(board_shape, ship_sizes)
+  # test_nash_equilibrium(board_shape, ship_sizes)
   

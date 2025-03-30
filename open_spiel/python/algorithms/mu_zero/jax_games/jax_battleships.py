@@ -46,6 +46,28 @@ class JaxBattleships(JaxGame):
     # 2*board_size^2 to 3*board_size^2 - 1: Shoot
     return 3 * self.height * self.width
   
+  def information_state_tensor_shape(self):
+    return (2 + # Player
+      2 + # Phase
+      self.board_size + # Ships
+      2 * 3 * self.board_size + # Shots (Miss, Hit, Sunken) [Player * Shot_result * Board Size]
+      (len(self.ship_sizes) + self.board_size) * (self.board_shape[0] + self.board_shape[1]) + # Player actions
+      self.board_size * (self.board_shape[0] + self.board_shape[1]) + # Opponent actions
+      len(self.ship_sizes) + # Placed ships
+      2 * len(self.ship_sizes) # Sunken ships per player
+    )
+    
+    
+  def public_state_tensor_shape(self): 
+    
+    return (
+      2 + # Phase 
+      2 * 3 * self.board_size + # Shots (Miss, Hit, Sunken) [Player * Shot_result * Board Size] 
+      2 * self.board_size * (self.board_shape[0] + self.board_shape[1]) + # Shot actions
+      len(self.ship_sizes) + # Placed ships
+      2 * len(self.ship_sizes) # Sunken ships per player
+    )
+  
   @functools.partial(jax.jit, static_argnums=(0,))
   def initialize_structures(self, key):
     # Initialize empty game state
