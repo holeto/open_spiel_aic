@@ -31,8 +31,8 @@ def validate_terminal(terminal, threshold: float = 0.5):
 def find_next_root(cfr: MuZeroCFR, tree_depth: int, player: int, public_state, iset):
   opponent = 1 - player
   public_state_histories = cfr.find_public_state_from_iset(iset, player, tree_depth)
-  #history_reaches = cfr.find_reaches_from_average()[tree_depth][:, public_state_histories]
-  history_reaches = np.asarray(cfr.last_depth_reaches)[:, public_state_histories]
+  history_reaches = cfr.find_reaches_from_average()[tree_depth][:, public_state_histories]
+  # history_reaches = np.asarray(cfr.last_depth_reaches)[:, public_state_histories]
   # TODO: Use numpy or jax.numpy?
   next_reaches = np.where(np.array([[player == 0], [player == 1]]), history_reaches, 1.0)
   depth_isets = np.array(cfr.constants.depth_history_iset[tree_depth])

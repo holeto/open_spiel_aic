@@ -416,6 +416,9 @@ def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: ch
   # The predicted dimension is missing
   chex.assert_shape((real,), (*pred.shape[:-2], pred.shape[-1]))
   cluster_difference = lax.stop_gradient(jnp.expand_dims(real, -2)) - pred
+  
+  cluster_difference = cluster_difference * valid[..., None, None]
+  
   cluster_distance = jnp.sum(cluster_difference **2, axis=-1)
   cluster_distance = cluster_distance + (cluster_distance < 1e-15)
   cluster_distance = cluster_distance ** 0.5
@@ -1384,8 +1387,9 @@ class MuZeroTrain():
 
     abstraction = vectorized_abstraction(abstraction_params, public_state)
     decoded_ps = vectorized_ps_decoder(ps_decoder_params, abstraction)
-    iset_probs = vectorized_iset_encoder(iset_encoder_params, obs) * valid[..., None]
-    similarity = vectorized_similarity(similarity_params, abstraction) * valid[..., None, None]
+    # Do we need this here?
+    iset_probs = vectorized_iset_encoder(iset_encoder_params, obs)
+    similarity = vectorized_similarity(similarity_params, abstraction)  
     
     ps_loss = (jnp.expand_dims(public_state, -2) - decoded_ps) * valid[...,None, None]
     ps_loss = jnp.mean(ps_loss ** 2)
@@ -1436,7 +1440,7 @@ class MuZeroTrain():
     vectorized_legal_actions = jax.vmap(self.legal_actions_network.apply, in_axes=(None, 0), out_axes=0)
     legal_actions = vectorized_legal_actions(legal_actions_params, obs)
     
-    loss = optax.losses.sigmoid_binary_cross_entropy(legal_actions, legal)
+    loss = optax.losses.sigmoid_binary_cross_entropy(legal_actions, legal) * valid[..., None]
     loss = jnp.sum(loss) / jnp.sum(valid)
     # loss = jnp.sum((legal - legal_actions) ** 2) / jnp.sum(valid)
     return loss

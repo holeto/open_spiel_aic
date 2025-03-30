@@ -295,9 +295,23 @@ class MuZeroCFR:
     
   # TODO: Could this be used in jit_step?
   def find_reaches(self, strategies):
-  
+    
     history_reaches = [self.constants.init_reaches]
-    history_strategies = [jnp.stack([strategies[d][pl][self.constants.depth_history_iset[d][pl]] for pl in range(self.players)], axis=0) for d in range(self.max_depth)]
+    
+    history_strategies = []
+    # We allow different legal actions in different histories, even if they are in the same infoset.
+    for d in range(self.max_depth):
+      p1_legals = jnp.sum(self.constants.depth_history_legal[d], -1) > 0
+      p2_legals = jnp.sum(self.constants.depth_history_legal[d], -2) > 0
+
+      p1_strategy = strategies[d][0][self.constants.depth_history_iset[d][0]]
+      p2_strategy = strategies[d][1][self.constants.depth_history_iset[d][1]]
+      
+      legals = jnp.stack([p1_legals, p2_legals], axis=0)
+      legalized_strategies = jnp.stack([p1_strategy, p2_strategy], axis=0)
+      legalized_strategies = legalized_strategies * legals
+      legalized_strategies = jnp.where(jnp.sum(legalized_strategies, axis=-1, keepdims=True) > 1e-8, legalized_strategies / jnp.sum(legalized_strategies, axis=-1, keepdims=True), legals / jnp.sum(legals, axis=-1, keepdims=True))
+      history_strategies.append(legalized_strategies)
     
     
     for d in range(self.max_depth - 1):
