@@ -209,7 +209,7 @@ class JaxBattleships(JaxGame):
       
       placing_legals = jnp.concatenate([horizontal_legals.flatten(), vertical_legals.flatten()], axis=0)
       
-      legal_actions = jnp.zeros(self.num_distinct_actions())
+      legal_actions = jnp.zeros(self.num_distinct_actions(), dtype=jnp.int32)
       
       
       legal_actions = jnp.where(turn >= len(self.ship_sizes) - 1, legal_actions.at[:self.board_size].set(shooting_legals), legal_actions.at[self.board_size:].set(placing_legals))
@@ -295,7 +295,7 @@ class JaxBattleships(JaxGame):
     
     sunked_all_ships = jnp.all(new_ship_hits >= self.ship_sizes_jax, axis=-1)
      
-    reward = jnp.where(sunked_all_ships, 1, 0)
+    reward = jnp.where(sunked_all_ships, 1.0, 0.0)
     reward = reward[0] - reward[1]
      
     
