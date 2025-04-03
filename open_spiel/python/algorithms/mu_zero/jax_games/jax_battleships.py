@@ -39,6 +39,9 @@ class JaxBattleships(JaxGame):
     self.max_ship = jnp.max(self.ship_sizes_jax)
     
     
+  def max_trajectory_length(self):
+    return len(self.ship_sizes) + self.board_size
+    
   def num_distinct_actions(self):
     # Actions are:
     # 0 to board_size^2 - 1: Place ship horizontally

@@ -10,7 +10,7 @@ parser = argparse.ArgumentParser()
 
 # Training setting
 parser.add_argument("--save_each", type=int, default=1000, help="Save network each amount of iterations")
-parser.add_argument("--iterations", type=int, default=2, help="MuZero network training iterations,  the whole algorithm will run for --iterations * --save_each")
+parser.add_argument("--iterations", type=int, default=20, help="MuZero network training iterations,  the whole algorithm will run for --iterations * --save_each")
 parser.add_argument("--save_folder", type=str, default="muzero_networks", help="Path to the saved trained networks")
 
 # Algorithm setting
@@ -24,9 +24,9 @@ parser.add_argument("--train_dynamics", type=bool, default=True, help="Train dyn
 parser.add_argument("--train_legal_actions", type=bool, default=True, help="Train legal actions")
 
 parser.add_argument("--use_abstraction", type=bool, default=True, help="Use abstraction")
-parser.add_argument("--abstraction_amount", type=int, default=10, help="Abstraction amount")
+parser.add_argument("--abstraction_amount", type=int, default=4, help="Abstraction amount")
 parser.add_argument("--abstraction_size", type=int, default=32, help="Abstraction size")
-parser.add_argument("--similarity_metric", type=str, default="legal_actions", help="Similarity metric. Choices: policy, value, policy_value, legal_actions, legal_policy_value")
+parser.add_argument("--similarity_metric", type=str, default="action_history_policy", help="Similarity metric. Choices: policy, value, policy_value, legal_actions, legal_policy_value, action_history_policy")
 
 parser.add_argument("--abstraction_soft_k_means_temperature", type=float, default=1.0, help="Abstraction soft k means temperature")
 parser.add_argument("--abstraction_soft_k_means_closeness_assignment", type=float, default=0.5, help="Abstraction soft k means closeness assignment")
@@ -57,11 +57,11 @@ parser.add_argument("--rho_state_vtrace", type=float, default=np.inf, help="Rho 
 
 parser.add_argument("--eta_regularization", type=float, default=0.2, help="Eta regularization")
 parser.add_argument("--entropy_schedule_repeats", type=int, nargs='+', default=[1], help="Entropy schedule repeats")
-parser.add_argument("--entropy_schedule_size", type=int, nargs='+', default=[500], help="Entropy schedule size")
+parser.add_argument("--entropy_schedule_size", type=int, nargs='+', default=[1000], help="Entropy schedule size")
 
 parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate")
 parser.add_argument("--target_network_update", type=float, default=1e-3, help="Target network update")
-parser.add_argument("--seed", type=int, default=134, help="Random seed, use 0 to have totally random seed")
+parser.add_argument("--seed", type=int, default=6666, help="Random seed, use 0 to have totally random seed")
 
 #Game setting:
 parser.add_argument("--board_shape", type=int, nargs='+', default=(2, 2), help="Board shape")

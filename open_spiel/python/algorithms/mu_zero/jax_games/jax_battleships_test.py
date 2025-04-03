@@ -184,13 +184,106 @@ def verify_shapes():
     assert p2_iset.shape[0] == game.information_state_tensor_shape()
     assert public_state.shape[0] == game.public_state_tensor_shape()
     
+
+def print_policy():
+  from open_spiel.python.algorithms.mu_zero.jax_games.jax_game_algorithms import stringify
+  
+  game = JaxBattleships(board_shape=(2, 2), ship_sizes=[2])
+  cfr, nash_policy, nash_value = nash_equilibrium_jax_game(game)
+  
+  key = jax.random.key(0)
+  def _traverse_tree(current_state, current_legal_actions, key, depth=0): 
+    state_tensor, p1_iset, p2_iset, public_state = game.get_info(current_state)
     
+    np_p1_iset = np.array(p1_iset)
+    np_p2_iset = np.array(p2_iset)
+    np_public_state = np.array(public_state)
+    # print("SHIPS")
+    # print(current_state.ships)
+    # print("SHOTS")
+    # print(current_state.shots) 
+    print(stringify(np_public_state))
+    print(stringify(np_p1_iset))
+    print(stringify(np_p2_iset))
+    print(nash_policy.policy[stringify(np_p1_iset)])
+    print(nash_policy.policy[stringify(np_p2_iset)]) 
+    for a1i, a1 in enumerate(current_legal_actions[0]):
+      if a1 < 0.5:
+        continue
+      
+      for a2i, a2 in enumerate(current_legal_actions[1]):
+        if a2 < 0.5:
+          continue
+        
+        action_key, next_key = jax.random.split(key)
+        new_state, is_terminal, reward, new_legal_actions = game.apply_action(
+          current_state, action_key, depth, jnp.array([a1i, a2i]))
+        
+        assert abs(reward) < 1.01
+      
+        if not is_terminal:
+          assert abs(reward) < 0.01
+          _traverse_tree(new_state, new_legal_actions, next_key, depth + 1)
+    
+    
+  init_key, action_key = jax.random.split(key)
+  init_state, legal_actions = game.initialize_structures(init_key) 
+  _traverse_tree(init_state, legal_actions, action_key)
+    
+def check_abstraction():
+  
+  from open_spiel.python.algorithms.mu_zero.experiments.utils import load_model
+  from open_spiel.python.algorithms.mu_zero.jax_games.jax_game_algorithms import stringify
+  default_model_path = "muzero_networks/battleships_2x2_2/seed_43/muzero_"
+  
+  game = JaxBattleships(board_shape=(2, 2), ship_sizes=[2])
+  key = jax.random.key(0)
+  state, legal_actions = game.initialize_structures(key)
+    
+  state, is_terminal, reward, legal_actions = game.apply_action(state, key, 0, jnp.array([8, 8]))
+  
+  print(legal_actions)
+  _, p1_iset, p2_iset, ps = game.get_info(state) 
+  
+  np_p1_iset = np.array(p1_iset)
+  np_p2_iset = np.array(p2_iset)
+  np_ps = np.array(ps)
+  
+  p1_iset_str = stringify(np_p1_iset)
+  p2_iset_str = stringify(np_p2_iset)
+  ps_str = stringify(np_ps)
+  
+  legals_leveled = 2 * legal_actions - 1
+  
+  for i in range(20, 21):
+    model_path = default_model_path + str(i) + ".pkl"
+    model = load_model(model_path)
+    
+    p1_abs, p2_abs, p1_probs, p2_probs, p1_sims, p2_sims = model.get_both_similarities_and_probs(ps, p1_iset, p2_iset)
+    
+    
+    print(p1_probs)
+    print(p1_sims)
+    print(p2_probs)
+    print(p2_sims)
+    # p1_t = np.sum(np.abs(legals_leveled[0] - p1_sims), 1)
+    # print(p1_t)
+    # p2_t = np.sum(np.abs(legals_leveled[1] - p2_sims), 1)
+    # print(p2_t)
+    
+    # print(p1_probs) 
+    # print(p1_sims)
+    
+    
+  
+  
+  
 
 if __name__ == "__main__":
   board_shape = (2, 2)
   ship_sizes = [2]
-  verify_shapes()
+  # verify_shapes()
   # test_state_tensor_uniqueness(board_shape, ship_sizes)
   # test_information_set_consistency(board_shape, ship_sizes)
   # test_nash_equilibrium(board_shape, ship_sizes)
-  
+  print_policy()

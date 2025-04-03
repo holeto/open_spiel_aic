@@ -16,11 +16,15 @@ class GoofspielGameState(GameState):
 class JaxGoofspiel(JaxGame):
   def __init__(self, cards, points_order="descending", turns=-1, reward_type: str = "clip") -> None:
     self.cards = cards
-    self.max_turns = cards - 1
+    self.max_turns = turns
     if turns <= 0:
       self.max_turns = cards
     self.points_order = points_order 
     self.reward_type = 0 if reward_type == "clip" else 1
+    
+  def max_trajectory_length(self):
+    return self.max_turns - 1
+  
   
   def num_distinct_actions(self):
     return self.cards

@@ -822,7 +822,7 @@ def solve_game_per_depth(model: MuZeroTrain, resolve_iterations: int = 1000, dep
   
   # For each depth level
   # TODO: Change this so it takes the max length from the game, or that it terminates when there are only terminals
-  for current_depth in range(game.cards - 1):
+  for current_depth in range(game.max_trajectory_length()):
     print(f"Solving in depth {current_depth}")
     
     p1_depth_iset_map = []
@@ -940,8 +940,8 @@ def solve_game_per_depth(model: MuZeroTrain, resolve_iterations: int = 1000, dep
       closest_id = np.argmin(closeness)
       
       avg_policy = average_policies[0][depth][closest_id] * legals[0]
-      if np.sum(avg_policy) <  1e-10:
-        p1_strategy = np.full_like(legals[0], 1 / legals[0].shape[0])
+      if np.sum(avg_policy) <  1e-10 or np.any(np.isnan(avg_policy)):
+        p1_strategy = legals[0] / np.sum(legals[0])
       else:
         p1_strategy = avg_policy / np.sum(avg_policy) 
       
@@ -951,11 +951,14 @@ def solve_game_per_depth(model: MuZeroTrain, resolve_iterations: int = 1000, dep
       closeness = np.linalg.norm(p2_abstracted - iset_maps[1][depth], axis=-1)
       closest_id = np.argmin(closeness)
       avg_policy = average_policies[1][depth][closest_id] * legals[1]
-      if np.sum(avg_policy) <  1e-10:
-        p2_strategy = np.full_like(legals[1], 1 / legals[1].shape[0])
+      if np.sum(avg_policy) <  1e-10 or np.any(np.isnan(avg_policy)):
+        p2_strategy = legals[1] / np.sum(legals[1])
       else:
         p2_strategy = avg_policy / np.sum(avg_policy) 
+    
       policy[p2_iset_str] = p2_strategy
+    
+  
     
     for a1i, a1 in enumerate(legals[0]):
       if a1 < 0.5:

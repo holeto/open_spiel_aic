@@ -120,11 +120,17 @@ def exploitability_jax_game(game: JaxGame, policy: JaxPolicy) -> tuple[JaxPolicy
     isets[depth][0].append(iset_map[depth][0].index(p1_iset_str))
     isets[depth][1].append(iset_map[depth][1].index(p2_iset_str))
     b_pol1 = np.array(policy[p1_iset_str])
-    b_pol2 = np.array(policy[p2_iset_str])
+    b_pol2 = np.array(policy[p2_iset_str]) 
     assert abs(np.sum(b_pol1) - 1) < 1e-3
     assert abs(np.sum(b_pol2) - 1) < 1e-3
-    behavior_policy[depth][0].append(np.array(policy[p1_iset_str]))
-    behavior_policy[depth][1].append(np.array(policy[p2_iset_str]))
+    # if abs(np.sum(b_pol1) -1) < 1e-3:
+    #   print("P1 Policy is < 0")
+    #   pass
+    # if abs(np.sum(b_pol2) - 1) < 1e-3:
+    #   print("P2 Policy is < 0")
+    #   pass 
+    behavior_policy[depth][0].append(b_pol1)
+    behavior_policy[depth][1].append(b_pol2)
     all_reaches[depth][0].append(reaches[0])
     all_reaches[depth][1].append(reaches[1])
       
@@ -199,8 +205,10 @@ def exploitability_jax_game(game: JaxGame, policy: JaxPolicy) -> tuple[JaxPolicy
   state_value = np.zeros((2, 1 ))
   for d in range(len(isets) -1, -1, -1):
     
-    p1_joint_action_value = rewards[d][0] + state_value[0][continuations[d]]
-    p2_joint_action_value = rewards[d][1] + state_value[1][continuations[d]]
+    p1_joint_action_value = np.where(continuations[d] < 0, rewards[d][0], state_value[0][continuations[d]])
+    p2_joint_action_value = np.where(continuations[d] < 0, rewards[d][1], state_value[1][continuations[d]])
+    # p1_joint_action_value = rewards[d][0] + state_value[0][continuations[d]]
+    # p2_joint_action_value = rewards[d][1] + state_value[1][continuations[d]]
     
     p1_action_value = np.sum(p1_joint_action_value * behavior_policy[d][1][:, None, ...], -1)
     p2_action_value = np.sum(p2_joint_action_value * behavior_policy[d][0][..., None], -2)
@@ -232,8 +240,8 @@ def exploitability_jax_game(game: JaxGame, policy: JaxPolicy) -> tuple[JaxPolicy
     p1_history_value = np.squeeze(np.take_along_axis(p1_action_value, p1_history_br[..., None], 1))
     p2_history_value = np.squeeze(np.take_along_axis(p2_action_value, p2_history_br[..., None], 1)) 
     
-    state_value = np.stack((p1_history_value, p2_history_value), 0)  
-    pass 
+    state_value = np.stack((p1_history_value, p2_history_value), 0)
+    
   return br_policy_p2, br_policy_p1, state_value[1], state_value[0]
 
 def expected_value_jax_game(game: JaxGame, policy: JaxPolicy):
