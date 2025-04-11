@@ -37,15 +37,15 @@ parser.add_argument("--transformation_soft_k_means_closeness_assignment", type=f
 parser.add_argument("--transformation_soft_k_means_repulsive_force", type=float, default=2.0, help="Transformation soft k means repulsive force")  
 
 parser.add_argument("--dynamics_type", type=str, default="public_state", help="Type of dynamics. Choices: iset, public_state")
-
+ 
 parser.add_argument("--ps_encoder_hidden_size", type=int, default=256, help="PS encoder hidden size")
 parser.add_argument("--ps_decoder_hidden_size", type=int, default=64, help="PS decoder hidden size")
 parser.add_argument("--iset_hidden_size", type=int, default=64, help="ISet hidden size")
 parser.add_argument("--dynamics_hidden_size", type=int, default=256, help="Dynamics hidden size")
 parser.add_argument("--similarity_hidden_size", type=int, default=64, help="Similarity hidden size")
-parser.add_argument("--mvs_hidden_size", type=int, default=64, help="MVS hidden size")
+parser.add_argument("--mvs_hidden_size", type=int, default=256, help="MVS hidden size")
 parser.add_argument("--legal_actions_hidden_size", type=int, default=64, help="Legal actions hidden size")
-parser.add_argument("--transformation_hidden_size", type=int, default=128, help="Transformation hidden size")
+parser.add_argument("--transformation_hidden_size", type=int, default=256, help="Transformation hidden size")
 parser.add_argument("--rnad_hidden_size", type=int, default=256, help="RNAD hidden size")
 
 parser.add_argument("--transformations", type=int, default=10, help="Number of transformations")
@@ -58,7 +58,7 @@ parser.add_argument("--rho_state_vtrace", type=float, default=np.inf, help="Rho 
 
 parser.add_argument("--eta_regularization", type=float, default=0.2, help="Eta regularization")
 parser.add_argument("--entropy_schedule_repeats", type=int, nargs='+', default=[1], help="Entropy schedule repeats")
-parser.add_argument("--entropy_schedule_size", type=int, nargs='+', default=[1000], help="Entropy schedule size")
+parser.add_argument("--entropy_schedule_size", type=int, nargs='+', default=[2000], help="Entropy schedule size")
 
 parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate")
 parser.add_argument("--target_network_update", type=float, default=1e-3, help="Target network update")
