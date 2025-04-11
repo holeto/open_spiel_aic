@@ -7,9 +7,11 @@ import matplotlib.pyplot as plt
 import jax
 import pyspiel
 import matplotlib.pyplot as plt
+import pickle
  
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame, JaxPolicy
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxGoofspiel, JaxModifiedGoofspiel
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_battleships import JaxBattleships
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_game_algorithms import nash_equilibrium_jax_game, exploitability_jax_game, prepare_cfr_from_game, extract_policy_from_cfr
 
 
@@ -77,7 +79,7 @@ def perform_kmeans(data, k, normalize=True, plot_results=False, random_seed=None
 def get_all_public_states_with_isets_and_similarites(game: JaxGame, sim_type: str, policy_dict: dict) -> tuple[dict, dict]:
 
 
-  assert sim_type == "legal" or sim_type == "policy", "Invalid similarity type"
+  assert sim_type == "legal" or sim_type == "policy" or sim_type == "iset", "Invalid similarity type"
 
  
   # Initialize empty dictionary for storing state-infoset mappings
@@ -479,10 +481,115 @@ def plot_all_cluster():
       plt.close()
       plt.cla()
       
+
+
+
+def compute_cluster_policy(game: JaxGame, state_sim_map: dict, state_iset_map: dict, seed: int, k: int):
+  state_cluster_map = {} 
+  np_rng = np.random.default_rng(seed=seed)
+  for state, sims in state_sim_map.items():
+    ps = destringify(state) 
+    for pl in range(2):
+      pl_sims = np.array(sims[pl]) 
+      cluster_amount = min(k, pl_sims.shape[0])
+      center, labels, distance = perform_kmeans(pl_sims, cluster_amount, normalize=False, random_seed=np_rng.integers(0, 1000000))
+      for iset_id, iset in enumerate(state_iset_map[state][pl]):
+        
+        state_cluster_map[iset] = np.concatenate((ps, center[labels[iset_id]])) 
+  original_tree_policy = compute_nash_kmeans_original_tree(game, state_cluster_map)
+  # modified_tree_policy = compute_nash_kmeans_modified_tree(game, state_cluster_map)
+  return original_tree_policy
+   
+def get_game_folder(game: JaxGame, folder_type:str):
+  if folder_type == "strategy":
+    init_folder = "muzero_strategies"
+  elif folder_type == "plot":
+    init_folder = "muzero_plots"
+  if isinstance(game, JaxGoofspiel):
+    return init_folder + "/goofspiel_" + str(game.cards) + "_" + game.points_order
+  elif isinstance(game, JaxModifiedGoofspiel):
+    return init_folder + "/goofspiel_" + str(game.cards) + "_last_max"
+  elif isinstance(game, JaxBattleships):
+    ship_sizes_str = "_".join([str(size) for size in game.ship_sizes])
+    return init_folder + "/battleships_" + str(game.height) + "x" + str(game.width) + "_" + ship_sizes_str
+  else:
+    raise ValueError("Invalid game")
+     
+def save_k_means_policies():   
+  
+  
+  orig_goof_experiments = [
+    (JaxGoofspiel(3, "descending"), "Goofspiel 3 descending", 4),
+    (JaxGoofspiel(4, "descending"), "Goofspiel 4 descending", 9),
+    (JaxGoofspiel(5, "descending"), "Goofspiel 5 descending", 31)
+    ]
+  
+  battleships_experiments = [
+    (JaxBattleships((2, 2), [2]), "Battleships 2x2", 6), 
+    ]
+  
+  sim_types = ["iset"] 
+  sim_types = ["legal", "policy"]
+  
+  amount_seeds = 10
+  for game, game_name, max_k in battleships_experiments: 
+    _, dict_nash, nash_value = nash_equilibrium_jax_game(game)
+    print(f"Nash of {game_name}: {nash_value[0]}")
+    
+    for sim_type in sim_types: 
+      state_iset_map, state_sim_map = get_all_public_states_with_isets_and_similarites(game, sim_type, dict_nash) 
+      # for k in range(4, 6):
+      for k in range(1, max_k):
+        print(k, flush=True)
+        for seed in range(amount_seeds):
+          policy = compute_cluster_policy(game, state_sim_map, state_iset_map, seed, k)  
+          policy_path = get_game_folder(game, "strategy") + "/kmeans_policy/orig_policy_" + sim_type + "_" + str(k) + "_" + str(seed) + ".pkl"
+          os.makedirs(os.path.dirname(policy_path), exist_ok=True)
+          
+          with open(policy_path, "wb") as f:
+            pickle.dump(policy, f)
+
+def evaluate_saved_policy(game: JaxGame, policy_path: str):
+  with open(policy_path, "rb") as f:
+    policy = pickle.load(f)
+  _, _, p1_exp, p2_exp = exploitability_jax_game(game, policy)
+  return p1_exp, p2_exp
+
+def mean_confidence_interval(data, confidence=0.95):
+  mean = np.mean(data, -1)
+  sem = st.sem(data, -1)
+  lower, upper = st.t.interval(confidence, data.shape[-1] - 1, loc=mean, scale=sem)
+  return mean, np.where(np.isnan(lower), mean, lower), np.where(np.isnan(upper), mean, upper)
+
+
+def plot_kmeans_exploitability_from_saved(game: JaxGame, sim_type: str, max_k:int, amount_seeds:int): 
+  p1_exps, p2_exps = np.zeros((max_k, amount_seeds)), np.zeros((max_k, amount_seeds))
+  for k in range(1, max_k):
+    for seed in range(amount_seeds): 
+      path = get_game_folder(game, "strategy") + "/kmeans_policy/orig_policy_" + sim_type + "_" + str(k) + "_" + str(seed) + ".pkl"
+      p1_exp, p2_exp = evaluate_saved_policy(game, path)
+      p1_exps[k, seed] = p1_exp
+      p2_exps[k, seed] = p2_exp
       
-      
-      
-      
+  p1_exps = p1_exps[1:]
+  p2_exps = p2_exps[1:]
+  mean_p1_exp, lower_p1_exp, upper_p1_exp = mean_confidence_interval(p1_exps)
+  mean_p2_exp, lower_p2_exp, upper_p2_exp = mean_confidence_interval(p2_exps)
+  
+  xs = np.arange(1, max_k)
+  plt.plot(xs, mean_p1_exp, color="r", label="P1 exploitability")
+  plt.plot(xs, mean_p2_exp, color="b", label="P2 exploitability")
+  plt.fill_between(xs, lower_p1_exp, upper_p1_exp, color="r", alpha=0.15)
+  plt.fill_between(xs, lower_p2_exp, upper_p2_exp, color="b", alpha=0.15)
+  plt.xlabel("K")
+  plt.ylabel("Exploitability")
+  plt.legend()
+  plot_folder = get_game_folder(game, "plot") + "/"
+  os.makedirs(plot_folder, exist_ok=True)
+  plt.savefig(plot_folder + "kmeans_policy_" + sim_type + "_exploitability.png")
+  plt.close()
+  plt.cla()
+
 def main():
   import sys
   cards = 3
@@ -557,4 +664,11 @@ def main():
   
   
 if __name__ == "__main__":
-  plot_all_cluster()
+  for sim_type in ["legal", "policy"]:
+    print(sim_type)
+    plot_kmeans_exploitability_from_saved(JaxGoofspiel(5, "descending"), sim_type, 31, 3)
+    # plot_kmeans_exploitability_from_saved(JaxBattleships((2, 2), [2]), sim_type, 5, 3)
+  
+  # print(evaluate_saved_policy(JaxBattleships((2, 2), [2]), "muzero_strategies/battleships2x2_2/kmeans_policy/orig_policy_iset_2_2.pkl"))
+  
+  # print(evaluate_saved_policy(JaxGoofspiel(5, "descending"), "muzero_strategies/goofspiel_5_descending/kmeans_policy/orig_policy_legal_4_5.pkl"))

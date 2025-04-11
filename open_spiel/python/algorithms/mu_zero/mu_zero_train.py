@@ -1,5 +1,4 @@
-
-from open_spiel.python.algorithms.rnad.rnad import _legal_policy, legal_log_policy, EntropySchedule
+from open_spiel.python.algorithms.rnad.rnad import EntropySchedule
 from open_spiel.python.algorithms.mu_zero.flax_utils import init_network_with_optimizer, init_params_optimizer, optax_optimizer, masked_l2_loss, masked_l2_loss_with_normalization
 
 from open_spiel.python.algorithms.rnad.rnad import RNaDSolver, RNaDConfig
@@ -7,13 +6,15 @@ from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame, Gam
 from open_spiel.python.policy import TabularPolicy
 from open_spiel.python.algorithms.exploitability import exploitability
 
+from open_spiel.python.algorithms.mu_zero.muzero_networks import MAVSNetwork, SimilarityNetwork, LegalActionsNetwork, PublicStateEncoder, InfosetEncoder, PublicStateDynamicsNetwork, DynamicsNetwork, TransformationNetwork, QCriticNetwork, ExpectedNetwork, RNaDNetwork, PublicStateDecoder
+from open_spiel.python.algorithms.mu_zero.train_utils import _policy_ratio,   neurd_loss, transform_trajectory_to_last_dimension, normalize_direction_with_mask,  _compute_soft_kmeans_loss_with_cluster_assignments, _compute_soft_kmeans_loss_with_single, state_v_trace, expected_v_trace, v_trace
+
 from typing import Sequence, Any, Callable
 from pyinstrument import Profiler
 import jax
 import jax.numpy as jnp
 import jax.lax as lax
 
-import flax.linen as nn
 import chex
 import optax
 
@@ -57,6 +58,9 @@ class Optimizers:
   similarity_optimizer: Sequence[Optimizer]  = ()
   legal_actions_optimizer: Sequence[Optimizer] = ()
   dynamics_optimizer: Optimizer = ()
+  
+  q_critic_optimizer: Optimizer = ()
+  q_critic_optimizer_target: Optimizer = ()
  
 @chex.dataclass
 class NetworkParameters:
@@ -76,197 +80,10 @@ class NetworkParameters:
   legal_actions_params: Sequence[Params] = ()
   dynamics_params: Params = ()
   
+  q_critic_params: Params = ()
+  q_critic_params_target: Params = ()
   
   
-# Holds the important properties that should be important as a similarity metric between 2 infosets for clustering
-class SimilarityNetwork(nn.Module):
-  hidden_size: int
-  out_dim: int
-  
-  
-  @nn.compact
-  def __call__(self, x: chex.Array) -> Any:
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.out_dim)(x)
-    return x
-
-# TODO: This may be better to output public state and indices of isets, but who knows
-class DynamicsNetwork(nn.Module):
-  hidden_size: int
-  abstraction_size: int
-  
-  @nn.compact
-  def __call__(self, p1_isets, p2_isets, p1_action, p2_action):
-    x = jnp.concatenate((p1_isets, p2_isets, p1_action, p2_action), axis=-1)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    
-    next_p1_iset = nn.Dense(self.abstraction_size)(x)
-    next_p2_iset = nn.Dense(self.abstraction_size)(x)
-    reward = nn.Dense(2)(x)
-    is_terminal = nn.Dense(1)(x)
-    
-    return next_p1_iset, next_p2_iset, reward, is_terminal
-
-class PublicStateDynamicsNetwork(nn.Module):
-  hidden_size: int
-  public_state_size: int
-  abstraction_amount: int
-  
-  @nn.compact
-  def __call__(self, p1_isets, p2_isets, p1_action, p2_action):
-    x = jnp.concatenate((p1_isets, p2_isets, p1_action, p2_action), axis=-1)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    public_state = nn.Dense(self.public_state_size)(x)
-    p1_dist = nn.Dense(self.abstraction_amount)(x)
-    p2_dist = nn.Dense(self.abstraction_amount)(x)
-    reward = nn.Dense(2)(x)
-    is_terminal = nn.Dense(1)(x)
-    return public_state, p1_dist, p2_dist, reward, is_terminal
-
-class InfosetEncoder(nn.Module):
-  hidden_size: int
-  isets: int
-  
-  @nn.compact
-  def __call__(self, x: chex.Array) -> Any:
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    iset = nn.Dense(self.isets)(x)
-    return iset 
-
-class PublicStateEncoder(nn.Module):
-  hidden_size: int
-  iset_size: int
-  isets: int
-  
-  @nn.compact
-  def __call__(self, x: chex.Array) -> chex.Array:
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    ps = nn.Dense(self.iset_size * self.isets)(x)
-    ps = ps.reshape(*ps.shape[:-1], self.isets, self.iset_size)
-    return ps
-
-class PublicStateDecoder(nn.Module):
-  hidden_size: int
-  public_state_size: int
-  
-  @nn.compact
-  def __call__(self, x: chex.Array) -> chex.Array:
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    ps = nn.Dense(self.public_state_size)(x)
-    return ps
-
-class LegalActionsNetwork(nn.Module):
-  hidden_size: int
-  out_dim: int
-  
-  
-  @nn.compact
-  def __call__(self, x: chex.Array) -> chex.Array:
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.out_dim)(x)
-    # x = nn.sigmoid(x)
-    return x
- 
-class TransformationNetwork(nn.Module):
-  hidden_size: int
-  transformations: int
-  actions: int
-  
-  @nn.compact
-  def __call__(self, x: chex.Array) -> chex.Array:
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.transformations * self.actions)(x)
-    x = x.reshape(*x.shape[:-1], self.transformations, self.actions)
-    return x
-
-class MAVSNetwork(nn.Module):
-  hidden_size: int
-  values: int 
-  
-  @nn.compact
-  def __call__(self, p1_iset: chex.Array, p2_iset: chex.Array) -> chex.Array:
-    x = jnp.concatenate((p1_iset, p2_iset), axis=-1)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.values * self.values)(x)
-    x = x.reshape(*x.shape[:-1], self.values, self.values)
-    return x 
-  
-class MUVSNetwork(nn.Module):
-  hidden_size: int
-  p1_values: int
-  p2_values: int
-  
-  @nn.compact
-  def __call__(self, p1_iset: chex.Array, p2_iset: chex.Array) -> chex.Array:
-    x = jnp.concatenate((p1_iset, p2_iset), axis=-1)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.values + self.values)(x)
-    x = x.reshape(*x.shape[:-1], 2, self.values)
-    return x
- 
-class ExpectedNetwork(nn.Module):
-  hidden_size: int 
-  
-  
-  @nn.compact
-  def __call__(self, p1_iset: chex.Array, p2_iset: chex.Array) -> chex.Array:
-    x = jnp.concatenate((p1_iset, p2_iset), axis=-1)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(1)(x)
-    return x
- 
-class RNaDNetwork(nn.Module):
-  hidden_size: int
-  out_dims: int
-  
-  
-  @nn.compact
-  def __call__(self, x, legal):
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    x = nn.Dense(self.hidden_size)(x)
-    x = nn.relu(x)
-    logit = nn.Dense(self.out_dims)(x)
-    v = nn.Dense(1)(x)
-    
-    pi = _legal_policy(logit, legal)
-    log_pi = legal_log_policy(logit, legal)
-    
-    return pi, v, log_pi, logit
-
 class SimilarityMetric(str, Enum):
   POLICY = "policy"
   VALUE = "value"
@@ -334,124 +151,6 @@ class MuZeroTrainConfig:
   target_network_update: float = 1e-3
   seed: int = 42
   
-
-def _policy_ratio(pi: chex.Array, mu: chex.Array, actions_oh: chex.Array, valid: chex.Array) -> chex.Array: 
-  pi_actions_prob = jnp.sum(pi * actions_oh, axis=-1, keepdims=True) * valid + (1 - valid)
-  mu_actions_prob = jnp.sum(mu * actions_oh, axis=-1, keepdims=True) * valid + (1 - valid)
-  
-  return pi_actions_prob / mu_actions_prob
-
-  
-
-def tree_where(pred: chex.Array, x: chex.ArrayTree, y: chex.ArrayTree) -> chex.ArrayTree:
-  
-  def _where(x, y):
-    return jnp.where(pred, x, y)
-  
-  return jax.tree.map(_where, x, y)
-  
-def apply_force_with_threshold(decision_outputs: chex.Array, force: chex.Array,
-                               threshold: float,
-                               threshold_center: chex.Array) -> chex.Array:
-  """Apply the force with below a given threshold."""
-  chex.assert_equal_shape((decision_outputs, force, threshold_center))
-  can_decrease = decision_outputs - threshold_center > -threshold
-  can_increase = decision_outputs - threshold_center < threshold
-  force_negative = jnp.minimum(force, 0.0)
-  force_positive = jnp.maximum(force, 0.0)
-  clipped_force = can_decrease * force_negative + can_increase * force_positive
-  return decision_outputs * lax.stop_gradient(clipped_force)
-
-
-
-def neurd_loss(
-  logits: chex.Array,
-  policy: chex.Array,
-  q_values: chex.Array, 
-  legal: chex.Array,
-  importance_sampling: chex.Array,
-  clip: float=10_000,
-  threshold: float=2.0
-):
-  advantage = q_values - jnp.sum(policy * q_values, axis=-1, keepdims=True)
-  advantage = advantage * importance_sampling
-  advantage = lax.stop_gradient(jnp.clip(advantage, -clip, clip))
-  mean_logit = jnp.sum(logits * legal, axis=-1, keepdims=True) / jnp.sum(legal, axis=-1, keepdims=True)
-  
-  logits_shifted = logits - mean_logit
-  threshold_ceter = jnp.zeros_like(logits_shifted)
-  
-  neurd_loss_value = jnp.sum(legal * apply_force_with_threshold(logits_shifted, advantage, threshold, threshold_ceter), axis=-1, keepdims=True)
-  
-  return neurd_loss_value
-
-# TODO: Verify that merges the vectors corectly
-def transform_trajectory_to_last_dimension(x: chex.Array) -> chex.Array:
-  return jnp.moveaxis(x, 0, -2).reshape((*x.shape[1:-1], -1))
-
-def normalize_direction_with_mask(x:chex.Array, mask:chex.Array) -> chex.Array:
-
-  x = mask * x 
-  #norm = jnp.linalg.norm(x, 2, -1, keepdims=True)
-  norm = jnp.sum(x ** 2, axis=-1, keepdims=True)
-  norm = norm + (norm < 1e-15)
-  norm = norm ** 0.5
-  ret = x / norm
-  return ret
-
-
-
-def compute_soft_assignments(cluster_distance: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float):
-  '''Computes a soft-assignments to soft k-means (fuzzy c-means). This is not the original method. When more than 1 point is too close to the center, we only move the closest one.'''
-  closest = jnp.min(cluster_distance, -1, keepdims=True)
-  # nulled_clusters = jnp.where(jnp.logical_and(cluster_distance < cluster_closeness_assignment, cluster_distance > closest + 1e-10), 0, 1)
-  soft_assignments = jax.nn.softmax(-cluster_distance * temperature, axis=-1)
-  
-  soft_assignments = jnp.where(jnp.logical_and(cluster_distance < cluster_closeness_assignment, cluster_distance > closest + 1e-10), -soft_assignments * repulsive_force, soft_assignments)
-  # soft_assignment = _legal_policy(-cluster_distance, nulled_clusters)
-  return soft_assignments
-
-
-# TODO: This should take valid into account
-def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: chex.Array, valid: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float):
-  # The predicted dimension is missing
-  chex.assert_shape((real,), (*pred.shape[:-2], pred.shape[-1]))
-  cluster_difference = lax.stop_gradient(jnp.expand_dims(real, -2)) - pred
-  
-  cluster_difference = cluster_difference * valid[..., None, None]
-  
-  cluster_distance = jnp.sum(cluster_difference **2, axis=-1)
-  cluster_distance = cluster_distance + (cluster_distance < 1e-15)
-  cluster_distance = cluster_distance ** 0.5
-  
-  cluster_soft_assignement = compute_soft_assignments(cluster_distance, temperature, cluster_closeness_assignment, repulsive_force)
-  
-  # energy_repulsion = pred  
-  cluster_each_other_distance = pred[..., :, None, :] - pred[..., None, :, :]
-  cluster_each_other_distance = jnp.sum(cluster_each_other_distance ** 2, axis=-1) 
-  
-  cluster_energy_repulsion = jnp.where(cluster_each_other_distance < 1e-8, 0, 1/(cluster_each_other_distance + 1e-9))
-  
-  cluster_energy_repulsion = cluster_energy_repulsion * 0.015
-  cluster_energy_repulsion = jnp.mean(cluster_energy_repulsion)
-  
-  cluster_loss = jnp.mean(cluster_difference ** 2, axis=-1)
-  cluster_loss = jnp.sum(cluster_loss * cluster_soft_assignement, axis=-1) * valid
-  return jnp.mean(cluster_loss) + cluster_energy_repulsion, cluster_soft_assignement
-  
-def _compute_soft_kmeans_loss_with_single(real: chex.Array, pred: chex.Array, probs: chex.Array, valid: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float):
-  cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred, valid, temperature, cluster_closeness_assignment, repulsive_force)
-  
-  # cluster_soft_assignement = jnp.where(cluster_soft_assignement >= jnp.max(cluster_soft_assignement, -1, keepdims=True), 1, 0)
-  # prob_loss = optax.losses.softmax_cross_entropy(probs,  jax.lax.stop_gradient(cluster_soft_assignement))
-  
-  cluster_hard_assignement = jnp.argmax(cluster_soft_assignement, axis=-1)
-  
-  prob_loss = optax.softmax_cross_entropy_with_integer_labels(probs, cluster_hard_assignement)
-  prob_loss = prob_loss * valid
-  
-  
-  return cluster_loss + jnp.mean(prob_loss)
 
 # This contains RNaD implementation. Note that this implementation is specific for two-player zero-sum games. Unlike the open_spiel RNaD that can be used to general-sum multiplayer games.
 class MuZeroTrain():
@@ -862,7 +561,6 @@ class MuZeroTrain():
     return p1_abstractions, p2_abstractions, p1_probs, p2_probs, p1_similarities, p2_similarities
     
     
-  
   # TODO: Improve this
   # Expects obs and legal to be in shape [Batch, Player, ...]
   def batch_policy_and_action(self, obs, legal):
@@ -1033,94 +731,6 @@ class MuZeroTrain():
     keys = jax.random.split(key, n)
     return keys
     
-  def v_trace(self, 
-    v: chex.Array,
-    valid: chex.Array,
-    sampling_policy: chex.Array,
-    network_policy: chex.Array,
-    regularization_term: chex.Array,
-    action_oh: chex.Array,
-    reward: chex.Array, # Still not regularized
-    lambda_: float = 1.0, # Lambda parameter for V-trace
-    c: float = 1.0, # Importance sampling clipping
-    rho: float = np.inf, # Importance sampling clipping
-    eta: float = 0.2, # Regularization factor 
-    gamma: float = 1.0 # Discount factor
-  ):
-    importance_sampling = _policy_ratio(network_policy, sampling_policy, action_oh, valid)
-    
-    # The reason we use this is to ensure this is weighted by the amount of the times we sample it
-    inverted_sampling = _policy_ratio(jnp.ones_like(sampling_policy), sampling_policy, action_oh, valid)
-    
-    regularization_entropy = eta * jnp.sum(network_policy * regularization_term, axis=-1)
-    weighted_regularization_term = -eta * regularization_term# + regularization_entropy[..., (1, 0), jnp.newaxis]
-    
-    both_player_entropy = (regularization_entropy[..., 1] - regularization_entropy[..., 0])
-    
-    entropy_reward = reward + both_player_entropy
-    entropy_reward = jnp.expand_dims(jnp.stack((entropy_reward, -entropy_reward), axis=-1), -1)
-    
-    
-    q_reward = jnp.stack((reward, -reward), axis=-1) + regularization_entropy[..., (1, 0)]
-    
-    q_reward = jnp.expand_dims(q_reward, -1)
-    
-    
-    
-    @chex.dataclass(frozen=True)
-    class VTraceCarry: 
-      next_value: chex.Array # Network value in the next timestep 
-      delta_v: chex.Array # Propagated delta V in V-trace from the next timestep
-    
-    
-    init_carry = VTraceCarry(
-      next_value=jnp.zeros_like(v[-1]),
-      delta_v=jnp.zeros_like(v[-1])
-    )
-  
-    def _v_trace(carry: VTraceCarry, x) -> tuple[VTraceCarry, Any]:
-      (importance_sampling, v, q_reward, entropy_reward, weighted_regularization_term, valid, inverted_sampling, action_oh) = x 
-      # reward_uncorrected = reward + gamma * carry.reward_uncorrected + entropy
-      # discounted_reward = reward + gamma * carry.reward
-      
-      delta_v = jnp.minimum(rho, importance_sampling) * (entropy_reward + gamma * carry.next_value - v)
-      carry_delta_v = delta_v + lambda_ * jnp.minimum(c, importance_sampling) * gamma * carry.delta_v
-      
-      v_target = v + carry_delta_v
-      
-      # TODO: Shall we use opponent entropy reg term or entropy of played action?
-      
-      # We use importance sampling of the opponent.
-      opponent_sampling = jnp.flip(importance_sampling, -2)
-      
-      q_value = v + weighted_regularization_term  + action_oh * opponent_sampling * inverted_sampling  * (q_reward + gamma * (carry.next_value + carry.delta_v) - v )
-      
-      
-      # q_value = weighted_regularization_term + action_oh * opponent_sampling * inverted_sampling * (q_reward + gamma * (carry.next_value + carry.delta_v))
-      
-      next_carry = VTraceCarry(
-        next_value=v,
-        delta_v=carry_delta_v
-      )
-      reset_carry = init_carry
-    
-      reset_v_target = jnp.zeros_like(v_target)
-      reset_q_value = jnp.zeros_like(q_value) 
-      
-      reset_carry = init_carry
-      return tree_where(valid, (next_carry, (v_target, q_value)), (reset_carry, (reset_v_target, reset_q_value)))
-      # return jnp.where(valid, next_carry, reset_carry), (v_target, q_value)
-      
-      
-      
-    _, (v_target, q_value) = lax.scan(
-      f=_v_trace,
-      init=init_carry,
-      xs=(importance_sampling, v, q_reward, entropy_reward, weighted_regularization_term, valid, inverted_sampling, action_oh),
-      reverse=True
-    ) 
-    return v_target, q_value
-  
   
   def rnad_loss(
     self,
@@ -1146,7 +756,7 @@ class MuZeroTrain():
     
     expanded_valid = jnp.expand_dims(timestep.valid, (-2, -1))
     
-    v_train_target, q_value = self.v_trace(v_target, expanded_valid, timestep.policy, pi, regularized_term, timestep.action, timestep.reward, c=self.config.c_iset_vtrace, rho=self.config.rho_iset_vtrace, eta=self.config.eta_regularization)
+    v_train_target, q_value = v_trace(v_target, expanded_valid, timestep.policy, pi, regularized_term, timestep.action, timestep.reward, c=self.config.c_iset_vtrace, rho=self.config.rho_iset_vtrace, eta=self.config.eta_regularization)
     
     # We multiply by 2, since each player acts
     normalization = jnp.sum(timestep.valid) * 2 
@@ -1239,60 +849,6 @@ class MuZeroTrain():
                                                                  self.config.transformation_soft_k_means_repulsive_force)
     return loss
   
-  def state_v_trace(
-    self,
-    v: chex.Array,
-    sampling_policy: chex.Array,
-    transformed_policy: chex.Array, 
-    actions_oh: chex.Array,
-    valid: chex.Array,
-    reward: chex.Array, # Still not regularized
-    lambda_: float = 1.0, # Lambda parameter for V-trace
-    c: float = 1.0, # Importance sampling clipping
-    rho: float = 1.0, # Importance sampling clipping 
-    gamma: float = 1.0 # Discount factor
-  ) -> chex.Array:
-    pi_action_prob = jnp.sum(transformed_policy * jnp.expand_dims(actions_oh, -3), axis=-1)
-    mu_action_prob = jnp.sum(sampling_policy * actions_oh, axis=-1)
-    importance_sampling = pi_action_prob / jnp.expand_dims(mu_action_prob, -2)
-    
-    p1_is = importance_sampling[..., 0, None]
-    p2_is = jnp.expand_dims(importance_sampling[..., 1], -2)
-    @chex.dataclass(frozen=True)
-    class StateVTraceCarry:
-      """The carry of the v-trace scan loop."""
-      next_state_value: chex.Array
-      next_state_delta_v: chex.Array
-      
-    init_carry = StateVTraceCarry(
-      next_state_value=jnp.zeros_like(v[-1]),
-      next_state_delta_v=jnp.zeros_like(v[-1])
-      
-    )
-    def _state_v_trace(carry: StateVTraceCarry, x) -> tuple[StateVTraceCarry, Any]:
-      (p1_is, p2_is, v, reward, valid) = x
-      
-      delta_v = jnp.minimum(rho, p1_is) * jnp.minimum(rho, p2_is) * (reward + gamma * carry.next_state_value - v)
-      
-      carry_delta_v = delta_v + lambda_ * jnp.minimum(c, p1_is) * jnp.minimum(c, p2_is) * gamma * carry.next_state_delta_v
-      
-      v_target = v + carry_delta_v
-      
-      reset_carry = init_carry
-      next_carry = StateVTraceCarry(
-        next_state_value=v,
-        next_state_delta_v=carry_delta_v
-      )
-      return tree_where(valid, (next_carry, v_target), (reset_carry, jnp.zeros_like(v_target)))
-    
-    _, v_target = lax.scan(
-      f=_state_v_trace,
-      init=init_carry,
-      xs=(p1_is, p2_is, v, jnp.expand_dims(reward, (-1, -2)), jnp.expand_dims(valid, (-1, -2))),
-      reverse=True
-    )
-    
-    return v_target
   
   def non_abstracted_mvs_loss(self, 
                               mvs_params: Params,
@@ -1360,7 +916,7 @@ class MuZeroTrain():
     # Invalid actions ?
     policy_transformations = policy_transformations / jnp.sum(policy_transformations, axis=-1, keepdims=True)
      
-    mvs_train_target = self.state_v_trace(mvs_target, timestep.policy, policy_transformations, timestep.action, timestep.valid, timestep.reward, c=self.config.c_state_vtrace, rho=self.config.rho_state_vtrace)
+    mvs_train_target = state_v_trace(mvs_target, timestep.policy, policy_transformations, timestep.action, timestep.valid, timestep.reward, c=self.config.c_state_vtrace, rho=self.config.rho_state_vtrace)
     
     # mask = timestep.valid[..., jnp.newaxis, jnp.newaxis]
 
@@ -2151,63 +1707,6 @@ class MuZeroTrain():
     
     return expected_params, expected_params_target, optimizers, expected_loss
     
-  def expected_v_trace(self,
-                       v: chex.Array,
-                       valid: chex.Array,
-                       sampling_policy: chex.Array,
-                       network_policy: chex.Array,
-                       regularization_term: chex.Array,
-                       action_oh: chex.Array,
-                       reward: chex.Array,
-                       lambda_: float = 1.0,
-                       c: float = 1.0,
-                       rho: float = 1.0,
-                       eta: float = 0.2,
-                       gamma: float = 1.0
-                       ):
-    importance_sampling = _policy_ratio(network_policy, sampling_policy, action_oh, valid[..., jnp.newaxis])
-    regularization_entropy = eta * jnp.sum(network_policy * regularization_term, axis=-1)
-    
-    both_player_entrpy = regularization_entropy[..., 1] - regularization_entropy[..., 0]
-    
-    entropy_reward = jnp.expand_dims(reward + both_player_entrpy, -1)
-    
-    @chex.dataclass(frozen=True)
-    class ExpectedVTraceCarry:
-      next_value: chex.Array
-      delta_v: chex.Array
-    
-    init_carry = ExpectedVTraceCarry(
-      next_value=jnp.zeros_like(v[-1]),
-      delta_v=jnp.zeros_like(v[-1])
-    )
-    
-    def _expected_v_trace(carry: ExpectedVTraceCarry, x) -> tuple[ExpectedVTraceCarry, Any]:
-      (importance_sampling, v, reward, valid) = x
-      
-      rho_ = jnp.prod(jnp.minimum(rho, importance_sampling), -2)
-      c_ = jnp.prod(jnp.minimum(c, importance_sampling), -2)
-      
-      delta_v = rho_ * (reward + gamma * carry.next_value - v)
-      carry_delta_v = delta_v + lambda_ * c_ * gamma * carry.delta_v
-      
-      v_target = v + carry_delta_v
-      
-      reset_carry = init_carry
-      next_carry = ExpectedVTraceCarry(
-        next_value=v,
-        delta_v=carry_delta_v
-      )
-      return tree_where(valid, (next_carry, v_target), (reset_carry, jnp.zeros_like(v_target)))
-    
-    _, v_target = lax.scan(
-      f=_expected_v_trace,
-      init=init_carry,
-      xs=(importance_sampling, v, entropy_reward, valid),
-      reverse=True
-    )
-    return v_target 
-    
     
   def expected_loss(self,
                     expected_params: Params,
@@ -2232,7 +1731,7 @@ class MuZeroTrain():
     expanded_valid = jnp.expand_dims(timestep.valid, (-1,))
     regularized_term = log_pi - (alpha * log_pi_prev + (1 - alpha) * log_pi_prev_)
     
-    v_train_target = self.expected_v_trace(
+    v_train_target = expected_v_trace(
       v_target, 
       expanded_valid,
       timestep.policy,
@@ -2364,108 +1863,10 @@ class MuZeroTrain():
     
      
 
-
-def compare_legals(muzero, game):
-
-  init_info = game.initialize_structures()
-  
-  ps, p1_isets, p2_isets = [], [], []
-  p1_real_legals, p2_real_legals = [], []
-  def _traverse_tree(game_state, key, current_legals, terminal, turn = 0):
-    if terminal:
-      return
-    _, p1_goof_iset, p2_goof_iset, public_state = game.get_info(game_state)
-    ps.append(public_state)
-    p1_isets.append(p1_goof_iset)
-    p2_isets.append(p2_goof_iset)
-    p1_real_legals.append(current_legals[0])
-    p2_real_legals.append(current_legals[1])
-    for a1_i, a1 in enumerate(current_legals[0]):
-      if a1 <= 0.5:
-        continue
-      for a2_i, a2 in enumerate(current_legals[1]):
-        if a2 <= 0.5:
-          continue 
-        new_game_state, new_terminal, new_rewards, new_legals = game.apply_action(game_state, key, turn, np.array([a1_i, a2_i]))
-        new_key = jax.random.split(key)[0]
-        _traverse_tree(new_game_state, new_key, new_legals, new_terminal, turn + 1)
-  
-  
-  
-  init_info = (*init_info, 0)
-  _traverse_tree(init_info)
-  ps = np.array(ps, dtype=np.float32)
-  p1_isets = np.array(p1_isets, dtype=np.float32)
-  p2_isets = np.array(p2_isets, dtype=np.float32)
-  p1_real_legals = np.array(p1_real_legals, dtype=np.int8)
-  p2_real_legals = np.array(p2_real_legals, dtype=np.int8)
-  # print(ps.shape)
-  # print(p1_isets.shape)
-  # print(p2_isets.shape)
-  # print(p1_real_legals.shape)
-  # print(p2_real_legals.shape)
-  p1_legals = muzero.get_legal_actions(ps, p1_isets, 0)
-  p2_legals = muzero.get_legal_actions(ps, p2_isets, 1)
-  
-  # print(p1_legals.shape)
-  # print(p2_legals.shape)
-  p1_legals = p1_legals >= 0.0
-  p2_legals = p2_legals >= 0.0
-  
-  p1_action_difference = np.sum(np.abs(p1_legals - p1_real_legals), -1)
-  p2_action_difference = np.sum(np.abs(p2_legals - p2_real_legals), -1)
-  p1_incorrect = np.sum(p1_action_difference > 0.1)
-  p2_incorrect = np.sum(p2_action_difference > 0.1)
-  print(p1_incorrect)
-  print(p2_incorrect)
-  
-def jax_compare_learned_trees(muzero, jax_game, orig_game):
-
-  init_info = jax_game.initialize_structures()
-  init_state = orig_game.new_initial_state()
-  
-  def _traverse_tree(state, game_state, key, current_legals, terminal, turn = 0):
-    if state.is_terminal():
-      return
-    _, p1_jax_iset, p2_jax_iset, public_state = jax_game.get_info(game_state)
-    for a1 in state.legal_actions(0):
-      for a2 in state.legal_actions(1):
-        new_state = state.clone()
-        new_state.apply_actions([a1, a2])
-        new_game_state, new_key, new_terminal, new_rewards, new_legals = jax_game.apply_action(game_state, key, turn, np.array([a1, a2]))
-        
-        _, next_p1_jax_iset, next_p2_jax_iset, next_public_state = jax_game.get_info(new_game_state)
-        
-        predicted_p1_iset, predicted_p2_iset, predicted_reward, predicted_terminal = muzero.get_next_state(public_state, p1_jax_iset, p2_jax_iset, a1, a2)
-        
-        # predicted_p1_iset, predicted_p2_iset, predicted_reward, predicted_terminal = muzero._jit_get_next_state(muzero.dynamics_params, p1_goof_iset, p2_goof_iset, a1, a2)
-        
-        abstracted_p1_iset, abstracted_p2_iset = muzero.get_both_abstraction(next_public_state, next_p1_jax_iset, next_p2_jax_iset)
-        
-        print(predicted_p1_iset)
-        print(abstracted_p1_iset)
-        print(jnp.linalg.norm(predicted_p1_iset - abstracted_p1_iset))
-        print(predicted_p2_iset)
-        print(abstracted_p2_iset)
-        print(jnp.linalg.norm(predicted_p2_iset - abstracted_p2_iset))
-        print(predicted_reward)
-        print(new_rewards)
-        print(new_state.is_terminal())
-        print(predicted_terminal > 0.0)
-        
-        
-        _traverse_tree(new_state, new_game_state, new_key, new_legals, new_terminal, turn + 1)
-  
-  
-  init_info = (*init_info, 0)
-  _traverse_tree(init_info, init_state)
-  
-  
-from open_spiel.python.algorithms.best_response import BestResponsePolicy
-from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxGoofspiel
-from open_spiel.python.algorithms.mu_zero.jax_games.jax_battleships import JaxBattleships
-
 def main():
+  
+  from open_spiel.python.algorithms.mu_zero.jax_games.jax_goofspiel import JaxGoofspiel
+  from open_spiel.python.algorithms.mu_zero.jax_games.jax_battleships import JaxBattleships
   cards = 5
   points_order = "descending"
   
@@ -2505,31 +1906,9 @@ def main():
     for _ in range(2000):
       muzero.jax_step()
   print("Trained")
+      
      
-  # goofspiel_compare_learned_trees(muzero, game, orig_game)
-  # print("Ee")
-  # compare_legals(muzero, game)
-  # profiler.stop()
-  # print(profiler.output_text(color=True, unicode=True))
-  
-  #policy = muzero.extract_full_policy()
-     
-  policy = muzero.extract_jax_policy(orig_game)
-  #print(policy.to_dict())
-  
-  # print(policy.action_probabilities(state, 0))
-  # print(policy.action_probabilities(state, 1))
-  # print(state.information_state_tensor(0))
-  # print(state.information_state_tensor(1))
-  # # print(exploitability(game, policy))
-  br1 = BestResponsePolicy(orig_game, 0, policy)
-  br2 = BestResponsePolicy(orig_game, 1, policy)
-  print(br1.value(orig_game.new_initial_state()))
-  print(br2.value(orig_game.new_initial_state()))
-  
-  # traj = muzero.sample_trajectories()
-  # print(traj.action.shape)
-  
+  policy = muzero.extract_jax_policy(orig_game) 
   
 if __name__ == "__main__":
   main()
