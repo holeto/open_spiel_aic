@@ -1438,7 +1438,7 @@ class MuZeroTrain():
     )
     
     transformation_params, optimizers, transformation_losses = self.update_transformations(
-      network_pmearaters.transformation_params,
+      network_parameters.transformation_params,
       abstraction_params,
       iset_encoder_params,
       optimizers,
