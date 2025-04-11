@@ -105,6 +105,7 @@ class MuZeroTrainConfig:
   sampling_epsilon: float = 0.0
   
   train_rnad: bool = True
+  train_transformations: bool = True
   train_mvs: bool = True
   train_abstraction: bool = True
   train_dynamics: bool = True
@@ -1238,8 +1239,8 @@ class MuZeroTrain():
     similarity_params = (*[optimizers.similarity_optimizer[pl](similarity_params[pl], abs_grad[pl][3]) for pl in range(2)],)
     
     return abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers, abs_losses
-    
-  def update_mvs_with_transformations(
+  
+  def update_mvs(
     self,
     mvs_params: Params,
     mvs_params_target: Params,
@@ -1248,13 +1249,37 @@ class MuZeroTrain():
     abstraction_params: tuple[Params, Params],
     iset_encoder_params: tuple[Params, Params],
     optimizers: Optimizers,
+    timestep: TimeStep,
+  ):
+    if not self.config.train_mvs:
+      return mvs_params, mvs_params_target, 0.0
+    mvs_loss, mvs_grad = self._mvs_loss(
+      mvs_params,
+      mvs_params_target,
+      policy_params,
+      transformation_params,
+      abstraction_params,
+      iset_encoder_params,
+      timestep
+    )
+    mvs_params = optimizers.mvs_optimizer(mvs_params, mvs_grad)
+    mvs_params_target = optimizers.mvs_optimizer_target(mvs_params_target, jax.tree.map(lambda a, b: a - b, mvs_params_target, mvs_params))
+    
+    return mvs_params, mvs_params_target, optimizers, mvs_loss
+     
+  def update_transformations(
+    self,
+    transformation_params: tuple[Params, Params],
+    abstraction_params: tuple[Params, Params],
+    iset_encoder_params: tuple[Params, Params],
+    optimizers: Optimizers,
     pi_before_train: chex.Array,
     pi_after_train: chex.Array,
     timestep: TimeStep,
     
   ):
-    if not self.config.train_mvs:
-      return mvs_params, mvs_params_target, transformation_params, optimizers, [0.0, 0.0, 0.0]
+    if not self.config.train_transformations:
+      return transformation_params, optimizers, [0.0, 0.0]
     transform_grad = []
     losses = []
     for pl in range(2): 
@@ -1274,20 +1299,7 @@ class MuZeroTrain():
      
     transformation_params = (*[optimizers.transformation_opitimizer[pl](transformation_params[pl], transform_grad[pl]) for pl in range(2)],)
     
-    mvs_loss, mvs_grad = self._mvs_loss(
-      mvs_params,
-      mvs_params_target,
-      policy_params,
-      transformation_params,
-      abstraction_params,
-      iset_encoder_params,
-      timestep
-    )
-    losses.append(mvs_loss)
-    mvs_params = optimizers.mvs_optimizer(mvs_params, mvs_grad)
-    mvs_params_target = optimizers.mvs_optimizer_target(mvs_params_target, jax.tree.map(lambda a, b: a - b, mvs_params_target, mvs_params))
-    
-    return mvs_params, mvs_params_target, transformation_params, optimizers, losses
+    return transformation_params, optimizers, losses
   
   def update_legal_actions(
     self,
@@ -1425,11 +1437,8 @@ class MuZeroTrain():
       timestep
     )
     
-    mvs_params, mvs_params_target, transformation_params, optimizers, mvs_loss = self.update_mvs_with_transformations(
-      network_parameters.mvs_params,
-      network_parameters.mvs_params_target,
-      network_parameters.transformation_params,
-      rnad_params,
+    transformation_params, optimizers, transformation_losses = self.update_transformations(
+      network_pmearaters.transformation_params,
       abstraction_params,
       iset_encoder_params,
       optimizers,
@@ -1437,6 +1446,18 @@ class MuZeroTrain():
       pi,
       timestep
     )
+    
+    mvs_params, mvs_params_target, optimizers, mvs_loss = self.update_mvs(
+      network_parameters.mvs_params,
+      network_parameters.mvs_params_target,
+      transformation_params,
+      rnad_params,
+      abstraction_params,
+      iset_encoder_params,
+      optimizers,
+      timestep
+    )
+    
     
     legal_actions_params, optimizers, legal_loss = self.update_legal_actions(
       network_parameters.legal_actions_params,
@@ -1458,9 +1479,9 @@ class MuZeroTrain():
       "RNaD Loss": rnad_loss,
       "P1 Abstraction Loss": abstraction_loss[0],
       "P2 Abstraction Loss": abstraction_loss[1],
-      "P1 Transformation Loss": mvs_loss[0],
-      "P2 Transformation Loss": mvs_loss[1],
-      "MVS Loss": mvs_loss[2],
+      "P1 Transformation Loss": transformation_losses[0],
+      "P2 Transformation Loss": transformation_losses[1],
+      "MVS Loss": mvs_loss,
       "P1 Legal Actions Loss": legal_loss[0],
       "P2 Legal Actions Loss": legal_loss[1],
       "Dynamics Loss": dynamics_loss

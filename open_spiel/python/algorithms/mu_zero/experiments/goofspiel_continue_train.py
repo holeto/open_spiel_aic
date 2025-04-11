@@ -17,7 +17,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--model_path", type=str, default="muzero_networks/goofspiel_5_descending/seed_779/muzero_147.pkl", help="Model path") 
 
 parser.add_argument("--save_each", type=int, default=1000, help="Save network each amount of iterations")
-parser.add_argument("--iterations", type=int, default=10, help="MuZero network training iterations,  the whole algorithm will run for --iterations * --save_each")
+parser.add_argument("--iterations", type=int, default=30, help="MuZero network training iterations,  the whole algorithm will run for --iterations * --save_each")
 parser.add_argument("--save_folder", type=str, default="muzero_networks", help="Path to the saved trained networks")
 
 def main(): 
@@ -32,7 +32,8 @@ def main():
     sampling_epsilon = model.config.sampling_epsilon,
     
     train_rnad = False,
-    train_mvs = False,
+    train_mvs = model.config.train_mvs,
+    train_transformations = False,
     train_abstraction = model.config.train_abstraction,
     train_dynamics = model.config.train_dynamics,
     train_legal_actions = model.config.train_legal_actions,

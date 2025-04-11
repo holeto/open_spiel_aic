@@ -19,6 +19,7 @@ parser.add_argument("--batch_size", type=int, default=64, help="Batch size for t
 
 parser.add_argument("--train_rnad", type=bool, default=True, help="Train RNAD")
 parser.add_argument("--train_mvs", type=bool, default=True, help="Train MVS")
+parser.add_argument("--train_transformations", type=bool, default=True, help="Train transformations")
 parser.add_argument("--train_abstraction", type=bool, default=True, help="Train abstraction")
 parser.add_argument("--train_dynamics", type=bool, default=True, help="Train dynamics")
 parser.add_argument("--train_legal_actions", type=bool, default=True, help="Train legal actions")

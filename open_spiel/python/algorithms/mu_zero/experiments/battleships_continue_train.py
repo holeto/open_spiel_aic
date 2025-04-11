@@ -32,7 +32,8 @@ def main():
     sampling_epsilon = model.config.sampling_epsilon,
     
     train_rnad = False,
-    train_mvs = False,
+    train_mvs = model.config.train_mvs,
+    train_transformations = False,
     train_abstraction = model.config.train_abstraction,
     train_dynamics = model.config.train_dynamics,
     train_legal_actions = model.config.train_legal_actions,
