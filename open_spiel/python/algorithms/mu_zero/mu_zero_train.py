@@ -449,6 +449,10 @@ class MuZeroTrain():
     return jnp.squeeze(jnp.take_along_axis(abstraction, picked_iset[..., jnp.newaxis], axis=-2), -2)
   
   @functools.partial(jax.jit, static_argnums=(0,))
+  def _jit_get_full_abstraction(self, abstraction_params, public_state):
+    return self.abstraction_network.apply(abstraction_params, public_state)
+  
+  @functools.partial(jax.jit, static_argnums=(0,))
   def _jit_get_abstraction_with_iset_id(self,abstraction_params,  iset_params, public_state, obs):
     abstraction = self.abstraction_network.apply(abstraction_params, public_state)
     iset = self.iset_encoder.apply(iset_params, obs)
@@ -475,6 +479,20 @@ class MuZeroTrain():
     p1_abstraction_iset = self._jit_get_abstraction(self.network_parameters.abstraction_params[0], self.network_parameters.iset_encoder_params[0], public_state, p1_iset)
     p2_abstraction_iset = self._jit_get_abstraction(self.network_parameters.abstraction_params[1], self.network_parameters.iset_encoder_params[1], public_state, p2_iset)
     return p1_abstraction_iset, p2_abstraction_iset
+  
+  def get_both_full_abstraction(self, public_state):
+    if not self.config.use_abstraction:
+      return jnp.ones((2, 1))
+    p1_abstraction_distribution = self._jit_get_full_abstraction(self.network_parameters.abstraction_params[0], public_state)
+    p2_abstraction_distribution = self._jit_get_full_abstraction(self.network_parameters.abstraction_params[1], public_state)
+    return p1_abstraction_distribution, p2_abstraction_distribution
+
+  def get_both_iset_probabilities(self, p1_iset, p2_iset):
+    p1_abstraction_distribution = self._jit_get_iset_probabilities(self.network_parameters.iset_encoder_params[0], p1_iset)
+    p2_abstraction_distribution = self._jit_get_iset_probabilities(self.network_parameters.iset_encoder_params[1], p2_iset)
+    p1_abstraction_distribution = jax.nn.softmax(p1_abstraction_distribution, axis=-1)
+    p2_abstraction_distribution = jax.nn.softmax(p2_abstraction_distribution, axis=-1)
+    return p1_abstraction_distribution, p2_abstraction_distribution
 
   def get_decoded_public_state(self, obs, pl):
     return self._jit_get_decoded_public_state(self.network_parameters.ps_decoder_params[pl], obs)

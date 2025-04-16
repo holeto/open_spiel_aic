@@ -19,7 +19,7 @@ class MuZeroCFRConstants:
   """Constants for JaxCFR."""
   resolving_player: int
 
-  init_reaches: chex.Array = ()
+  init_reaches: chex.Array = () # [Pl, H] 
 
   depth_actions: chex.ArrayTree = ()  # Is just a list of integers
   
@@ -532,7 +532,7 @@ class MuZeroCFR:
         bin_reaches = jnp.bincount(self.constants.depth_history_iset[d][1].ravel(), history_reaches[d][0].ravel(), length=self.constants.depth_iset_legal[d][1].shape[0]).reshape(cf_values[d][1].shape)
         
         bin_cf_value = jnp.where(bin_reaches > 1e-8, bin_cf_value / bin_reaches, bin_cf_value)        
-        cf_values[d][1] = cf_values[d][1] +  (bin_cf_value - cf_values[d][1]) * (2/(iteration + 1))
+        cf_values[d][1] = cf_values[d][1] + (bin_cf_value - cf_values[d][1]) * (2 / (iteration + 1))
         
         regrets[d][1] = jnp.maximum(regrets[d][1] - p2_bin_regrets, 0.0)
       

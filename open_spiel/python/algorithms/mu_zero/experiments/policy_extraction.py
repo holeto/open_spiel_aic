@@ -885,6 +885,14 @@ def solve_game_per_depth(model: MuZeroTrain, resolve_iterations: int = 1000, dep
     
     # Gadget or no gadget
     if current_depth == 0:
+      
+      # policy = p1_depth_iset_legal[0][0] / np.sum(p1_depth_iset_legal[0][0])
+      
+      # average_policies[0].append(np.array(policy))
+      # iset_maps[0].append(p1_depth_iset_map[0][0])
+      # average_policies[1].append(np.array(policy))
+      # iset_maps[1].append(p2_depth_iset_map[0][1])
+      
       extract_policy(p1_cfr, p1_depth_iset_map, 0, 0)
       extract_policy(p2_cfr, p2_depth_iset_map, 1, 0)
     else:
@@ -894,7 +902,10 @@ def solve_game_per_depth(model: MuZeroTrain, resolve_iterations: int = 1000, dep
     # Prepare structures for next depth
     # Those are isets, iset_map, iset_ids, cf_values, reaches
     
-    depth_for_next = 1 if current_depth == 0 else 2
+    if current_depth == game.max_trajectory_length() - 1:
+      break
+    
+    depth_for_next = 1 if current_depth == 0 else 2 
     
     p1_reaches = p1_cfr.find_reaches_from_average()[depth_for_next]
     p2_reaches = p2_cfr.find_reaches_from_average()[depth_for_next]
@@ -903,8 +914,8 @@ def solve_game_per_depth(model: MuZeroTrain, resolve_iterations: int = 1000, dep
     p1_reaches = jnp.where(jax.nn.one_hot(1, 2)[..., None] < 0.5, p1_reaches, 1.0)
     p2_reaches = jnp.where(jax.nn.one_hot(0, 2)[..., None] < 0.5, p2_reaches, 1.0)
     
-      
-    p1_cf_values = p1_cfr.cf_values[depth_for_next][1][p1_depth_history_iset[depth_for_next][0]]
+    # P1 CF values are cf values of player 2
+    p1_cf_values = p1_cfr.cf_values[depth_for_next][1][p1_depth_history_iset[depth_for_next][1]]
     p2_cf_values = p2_cfr.cf_values[depth_for_next][0][p2_depth_history_iset[depth_for_next][0]]
     
     assert jnp.allclose(p1_depth_iset_map[depth_for_next][0], p2_depth_iset_map[depth_for_next][0])
@@ -916,8 +927,7 @@ def solve_game_per_depth(model: MuZeroTrain, resolve_iterations: int = 1000, dep
     first_iset_map = [p1_depth_iset_map[depth_for_next][0], p2_depth_iset_map[depth_for_next][1]]
     first_iset_ids = p1_depth_history_iset[depth_for_next]
     
-     
-    
+      
   policy = {}
   # def find_most_likely_index(iset, player, depth):
   #   closeness = np.linalg.norm(iset - self.depth_iset_map[depth][player], axis=-1)
