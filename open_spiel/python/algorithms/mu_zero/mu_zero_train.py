@@ -1421,18 +1421,21 @@ class MuZeroTrain():
     
     # v will not be used in future! Here it contains the regularized value function
     pi, v, _, _ = vectorized_net_apply(rnad_params, timestep.obs, timestep.legal)
+    sim_pi = (pi - 0.5) * 4
     if self.config.similarity_metric == SimilarityMetric.POLICY_VALUE:
-      similarity = jnp.concatenate(((pi * 2) - 1, v), axis=-1)
+      
+      similarity = jnp.concatenate((sim_pi, v), axis=-1)
+      
       # similarity = jnp.concatenate((pi, v), axis=-1)
     elif self.config.similarity_metric == SimilarityMetric.POLICY:
-      similarity = (pi * 2) - 1
+      similarity = sim_pi
     elif self.config.similarity_metric == SimilarityMetric.VALUE:
       similarity = v
     elif self.config.similarity_metric == SimilarityMetric.LEGAL_ACTIONS:
       similarity = (timestep.legal * 2) - 1 # to be in range [-1, 1]
     elif self.config.similarity_metric == SimilarityMetric.LEGAL_POLICY_VALUE:
       # TODO: Legal actions have half of the weights that policy has.
-      similarity = jnp.concatenate((timestep.legal - 0.5, (pi * 2) - 1, v), axis=-1)
+      similarity = jnp.concatenate(((timestep.legal * 2) - 1, sim_pi, v), axis=-1)
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY_POLICY: 
       
       # TODO: This can use Trajectory_max * trajectory_max - 1 instead, since the last action is not used
@@ -1441,7 +1444,7 @@ class MuZeroTrain():
       action = (timestep.action[None, ...] - 0.5) * 0.5
       action = used_actions[..., None, None, None] * action
       action = jnp.moveaxis(action, 1, -2).reshape(*timestep.action.shape[:-1], -1) 
-      similarity = jnp.concatenate((action, (pi * 2) - 1), axis=-1)
+      similarity = jnp.concatenate((action, sim_pi), axis=-1)
       # similarity = jnp.concatenate((timestep.legal - 0.5, (pi * 2) - 1, v), axis=-1)
     
     
