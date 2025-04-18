@@ -505,6 +505,8 @@ def get_game_folder(game: JaxGame, folder_type:str):
     init_folder = "muzero_strategies"
   elif folder_type == "plot":
     init_folder = "muzero_plots"
+  elif folder_type == "nash":
+    init_folder = "muzero_nash"
   if isinstance(game, JaxGoofspiel):
     return init_folder + "/goofspiel_" + str(game.cards) + "_" + game.points_order
   elif isinstance(game, JaxModifiedGoofspiel):
@@ -515,6 +517,23 @@ def get_game_folder(game: JaxGame, folder_type:str):
   else:
     raise ValueError("Invalid game")
      
+def save_single_policy(game: JaxGame, state_sim_map: dict, state_iset_map: dict, seed: int, k: int, sim_type: str):
+  policy = compute_cluster_policy(game, state_sim_map, state_iset_map, seed, k)  
+  policy_path = get_game_folder(game, "strategy") + "/kmeans_policy/orig_policy_" + sim_type + "_" + str(k) + "_" + str(seed) + ".pkl"
+  os.makedirs(os.path.dirname(policy_path), exist_ok=True)
+  with open(policy_path, "wb") as f:
+    pickle.dump(policy, f)
+
+def compute_or_load_nash(game: JaxGame):
+  nash_path = get_game_folder(game, "nash") + "/nash_equilibrium.pkl"
+  if os.path.exists(nash_path):
+    with open(nash_path, "rb") as f:
+      return pickle.load(f)
+  _, dict_nash, nash_value = nash_equilibrium_jax_game(game)
+  with open(nash_path, "wb") as f:
+    pickle.dump(dict_nash, f)
+  return dict_nash
+
 def save_k_means_policies():   
   
   
@@ -524,30 +543,27 @@ def save_k_means_policies():
     (JaxGoofspiel(5, "descending"), "Goofspiel 5 descending", 31)
     ]
   
+  large_goof_experiments = [
+    (JaxGoofspiel(6, "descending"), "Goofspiel 6 descending", 168)
+  ]
+  
   battleships_experiments = [
-    (JaxBattleships((2, 2), [2]), "Battleships 2x2", 6), 
+    (JaxBattleships((2, 2), [2]), "Battleships 2x2", 3), 
     ]
   
   sim_types = ["iset"] 
   sim_types = ["legal", "policy"]
   
   amount_seeds = 10
-  for game, game_name, max_k in battleships_experiments: 
-    _, dict_nash, nash_value = nash_equilibrium_jax_game(game)
-    print(f"Nash of {game_name}: {nash_value[0]}")
-    
+  for game, game_name, max_k in large_goof_experiments: 
+    dict_nash = compute_or_load_nash(game)
     for sim_type in sim_types: 
       state_iset_map, state_sim_map = get_all_public_states_with_isets_and_similarites(game, sim_type, dict_nash) 
       # for k in range(4, 6):
       for k in range(1, max_k):
         print(k, flush=True)
-        for seed in range(amount_seeds):
-          policy = compute_cluster_policy(game, state_sim_map, state_iset_map, seed, k)  
-          policy_path = get_game_folder(game, "strategy") + "/kmeans_policy/orig_policy_" + sim_type + "_" + str(k) + "_" + str(seed) + ".pkl"
-          os.makedirs(os.path.dirname(policy_path), exist_ok=True)
-          
-          with open(policy_path, "wb") as f:
-            pickle.dump(policy, f)
+        for seed in range(amount_seeds): 
+          save_single_policy(game, state_sim_map, state_iset_map, seed, k, sim_type)
 
 def evaluate_saved_policy(game: JaxGame, policy_path: str):
   with open(policy_path, "rb") as f:
@@ -664,9 +680,10 @@ def main():
   
   
 if __name__ == "__main__":
-  for sim_type in ["legal", "policy"]:
-    print(sim_type)
-    plot_kmeans_exploitability_from_saved(JaxGoofspiel(5, "descending"), sim_type, 31, 3)
+  save_k_means_policies()
+  # for sim_type in ["legal", "policy"]:
+  #   print(sim_type)
+  #   plot_kmeans_exploitability_from_saved(JaxGoofspiel(5, "descending"), sim_type, 31, 3)
     # plot_kmeans_exploitability_from_saved(JaxBattleships((2, 2), [2]), sim_type, 5, 3)
   
   # print(evaluate_saved_policy(JaxBattleships((2, 2), [2]), "muzero_strategies/battleships2x2_2/kmeans_policy/orig_policy_iset_2_2.pkl"))
