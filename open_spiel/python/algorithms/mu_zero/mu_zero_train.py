@@ -94,6 +94,7 @@ class SimilarityMetric(str, Enum):
   ACTION_HISTORY_POLICY = "action_history_policy"
   ACTION_HISTORY_LEGAL = "action_history_legal"
   ACTION_HISTORY_LEGAL_POLICY = "action_history_legal_policy"
+  ISET_VECTOR = "iset_vector"
  
  
 class DynamicsType(str, Enum):
@@ -357,6 +358,8 @@ class MuZeroTrain():
       return self.actions * self.config.trajectory_max + self.actions
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY_LEGAL_POLICY:
       return self.actions * self.config.trajectory_max + 2 * self.actions
+    elif self.config.similarity_metric == SimilarityMetric.ISET_VECTOR:
+      return self.game.information_state_tensor_shape()
     assert False, "Unknown similarity metric"   
 
   def default_timestep(self):
@@ -1480,6 +1483,8 @@ class MuZeroTrain():
       action = used_actions[..., None, None, None] * action
       action = jnp.moveaxis(action, 1, -2).reshape(*timestep.action.shape[:-1], -1) 
       similarity = jnp.concatenate((action, (timestep.legal * 2) - 1, sim_pi), axis=-1)
+    elif self.config.similarity_metric == SimilarityMetric.ISET_VECTOR:
+      similarity = timestep.obs
     
     abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers, abstraction_loss = self.update_abstraction(
       network_parameters.abstraction_params,
