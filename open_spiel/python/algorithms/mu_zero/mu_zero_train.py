@@ -90,6 +90,7 @@ class SimilarityMetric(str, Enum):
   POLICY_VALUE = "policy_value"
   LEGAL_ACTIONS = "legal_actions"
   LEGAL_POLICY_VALUE = "legal_policy_value"
+  ACTION_HISTORY = "action_history"
   ACTION_HISTORY_POLICY = "action_history_policy"
   ACTION_HISTORY_LEGAL = "action_history_legal"
   ACTION_HISTORY_LEGAL_POLICY = "action_history_legal_policy"
@@ -348,6 +349,8 @@ class MuZeroTrain():
       return self.actions
     elif self.config.similarity_metric == SimilarityMetric.LEGAL_POLICY_VALUE:
       return 2 * self.actions + 1
+    elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY:
+      return self.actions * self.config.trajectory_max
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY_POLICY:
       return self.actions * self.config.trajectory_max + self.actions
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY_LEGAL:
@@ -1440,6 +1443,21 @@ class MuZeroTrain():
     elif self.config.similarity_metric == SimilarityMetric.LEGAL_POLICY_VALUE:
       # TODO: Legal actions have half of the weights that policy has.
       similarity = jnp.concatenate(((timestep.legal * 2) - 1, sim_pi, v), axis=-1)
+    elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY: 
+      used_actions = jnp.tri(self.config.trajectory_max, self.config.trajectory_max, k=-1)
+      action = (timestep.action[None, ...] - 0.5) * 0.5
+      action = used_actions[..., None, None, None] * action
+      action = jnp.moveaxis(action, 1, -2).reshape(*timestep.action.shape[:-1], -1) 
+      similarity = action
+    elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY_POLICY: 
+      
+      # TODO: This can use Trajectory_max * trajectory_max - 1 instead, since the last action is never used
+      used_actions = jnp.tri(self.config.trajectory_max, self.config.trajectory_max, k=-1)
+      
+      action = (timestep.action[None, ...] - 0.5) * 2
+      action = used_actions[..., None, None, None] * action
+      action = jnp.moveaxis(action, 1, -2).reshape(*timestep.action.shape[:-1], -1) 
+      similarity = jnp.concatenate((action, sim_pi), axis=-1)
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY_POLICY: 
       
       # TODO: This can use Trajectory_max * trajectory_max - 1 instead, since the last action is never used
@@ -1936,9 +1954,9 @@ def main():
   
   game = JaxGoofspiel(cards, points_order)
   
-  board_shape = (2, 2)
-  ship_sizes = [2]
-  game = JaxBattleships(board_shape, ship_sizes)
+  # board_shape = (2, 2)
+  # ship_sizes = [2]
+  # game = JaxBattleships(board_shape, ship_sizes)
   
   
   init, _ = game.initialize_structures(jax.random.key(0))
@@ -1948,7 +1966,7 @@ def main():
   mu = True
   if mu == True:
     
-    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=8, trajectory_max=len(ship_sizes) + board_shape[0] * board_shape[1], use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,), dynamics_type="public_state", similarity_metric="action_history_policy"))
+    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=8, trajectory_max=game.max_trajectory_length(), use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,), dynamics_type="public_state", similarity_metric="action_history_legal_policy"))
     
     # muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=128, trajectory_max=cards - 1, use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,), dynamics_type="public_state", similarity_metric="legal_actions"))
     # muzero.rng_key = jax.random.PRNGKey(42)
