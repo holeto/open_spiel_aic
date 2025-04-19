@@ -530,6 +530,7 @@ def compute_or_load_nash(game: JaxGame):
     with open(nash_path, "rb") as f:
       return pickle.load(f)
   _, dict_nash, nash_value = nash_equilibrium_jax_game(game)
+  os.makedirs(os.path.dirname(nash_path), exist_ok=True)
   with open(nash_path, "wb") as f:
     pickle.dump(dict_nash, f)
   return dict_nash
