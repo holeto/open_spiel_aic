@@ -1484,7 +1484,7 @@ class MuZeroTrain():
       action = jnp.moveaxis(action, 1, -2).reshape(*timestep.action.shape[:-1], -1) 
       similarity = jnp.concatenate((action, (timestep.legal * 2) - 1, sim_pi), axis=-1)
     elif self.config.similarity_metric == SimilarityMetric.ISET_VECTOR:
-      similarity = timestep.obs
+      similarity = (timestep.obs * 2) - 1
     
     abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers, abstraction_loss = self.update_abstraction(
       network_parameters.abstraction_params,
