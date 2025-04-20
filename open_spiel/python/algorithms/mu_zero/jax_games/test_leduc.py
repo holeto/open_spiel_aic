@@ -33,38 +33,20 @@ def extract_from_jax_leduc(seed):
   #state_tensors = []
   count_states_by_isets = [{} for _ in range(2)]
   count_isets_by_public_state = [{} for _ in range(2)]
-  all_actions = jnp.tile(jnp.arange(4), (2, 1))
   key = jax.random.key(seed)
-  keys = jax.random.split(key, 1)
   #represent state as the carry information from it
-  vectorized_init = jax.vmap(game.initialize_structures, in_axes=(0), out_axes=(0, 0, 0))
-  game_state, key, legals = vectorized_init(keys)
-  vectorized_get_info = jax.vmap(game.get_info, in_axes=(0), out_axes=(0, 0, 0, 0))
-  vectorized_apply_action = jax.vmap(game.apply_action, in_axes=(0, 0, None, 0), out_axes=(0, 0, 0, 0, 0))
+  game_state, legals = game.initialize_structures(key)
   def get_new_carries(carry : SampleTrajectoryCarry, joint_action, turn):
     carries =[]
     public_cards = []
-    game_state, key, terminal, rewards, new_legals  = vectorized_apply_action(carry.game_state, carry.key, turn, joint_action)
+    game_state, terminal, reward, new_legals  = game.apply_action(carry.game_state, carry.key, turn, joint_action)
     if terminal:
       return []
     #simulate second chance node
-    if carry.game_state.public_card[0] == 0 and game_state.public_card[0] > 0:
-      for c in range(6):
-        if c in game_state.private_cards[0]:
-          continue
-        public_cards.append(jnp.array(c + 1, dtype=int)[None, ...])
-    else:
-      public_cards.append(game_state.public_card)
-    for pc in public_cards:
-      new_game_state = LeducGameState( 
-        action_history = game_state.action_history,
-        public_card = pc,
-        private_cards = game_state.private_cards,
-        current_chips = game_state.current_chips,
-        turns_this_round = game_state.turns_this_round
-      )
+    pc_chance_outcomes = game.generate_all_public_card_nodes(game_state)
+    for outcome in pc_chance_outcomes:
       new_carry = SampleTrajectoryCarry(
-        game_state = new_game_state,
+        game_state = outcome,
         terminal= terminal,
         key = key,
         legal_actions = new_legals)
@@ -73,33 +55,23 @@ def extract_from_jax_leduc(seed):
   q = deque()
   visited = []
   #6 cards in total
-  for c1 in range(6):
-    for c2 in range(6):
-      if c1 == c2:
-        continue
-      private_cards = jnp.array([c1, c2], dtype=int)[None, ...]
-      new_game_state = LeducGameState(
-                        action_history = game_state.action_history,
-                        public_card = game_state.public_card,
-                        private_cards = private_cards,
-                        current_chips = game_state.current_chips,
-                        turns_this_round = game_state.turns_this_round
-      )
-      init_carry = SampleTrajectoryCarry(
-                        game_state = new_game_state,
-                        terminal= jnp.zeros([1,1], dtype=bool),
-                        key = key,
-                        legal_actions = legals)
-      q.append((init_carry, 0))
+  roots, legals = game.generate_all_private_card_nodes()
+  for root_state in roots:
+    init_carry = SampleTrajectoryCarry(
+                      game_state = root_state,
+                      terminal= jnp.zeros([1,1], dtype=bool),
+                      key = key,
+                      legal_actions = legals)
+    q.append((init_carry, 0))
   while len(q) > 0:
     carry, turn = q.popleft()
     if(carry.terminal):
       continue
-    #print(carry.game_state.current_chips)
-    state, p1_iset, p2_iset, public_state = vectorized_get_info(carry.game_state)
+    #print(carry.game_state)
+    state, p1_iset, p2_iset, public_state = game.get_info(carry.game_state)
     #squeeze out the 1-element batch
-    infosets_str = [jnp.array_str(p1_iset[0]), jnp.array_str(p2_iset[0])]
-    public_state_str = jnp.array_str(public_state[0])
+    infosets_str = [jnp.array_str(p1_iset), jnp.array_str(p2_iset)]
+    public_state_str = jnp.array_str(public_state)
     for pl, iset_str in enumerate(infosets_str):
       if iset_str in count_states_by_isets[pl].keys():
         count_states_by_isets[pl][iset_str] += 1
@@ -109,17 +81,21 @@ def extract_from_jax_leduc(seed):
           count_isets_by_public_state[pl][public_state_str] += 1
         else:
           count_isets_by_public_state[pl][public_state_str] = 1
-    if not str(state) in visited:
-      legal_mask_p1 = carry.legal_actions[0][0].astype(bool)
-      legal_mask_p2 = carry.legal_actions[0][1].astype(bool)
-      p1_actions = all_actions[0][legal_mask_p1]
-      p2_actions = all_actions[1][legal_mask_p2]
-      visited.append(str(state))
-      for a1 in p1_actions:
-        for a2 in p2_actions:
-          new_carries = get_new_carries(carry, jnp.asarray([a1, a2])[jnp.newaxis, ...], turn)
+    if not jnp.array_str(state) in visited:
+      legal_mask_p1 = carry.legal_actions[0].astype(bool)
+      legal_mask_p2 = carry.legal_actions[1].astype(bool)
+      for a1i, a1 in enumerate(legal_mask_p1):
+        for a2i, a2 in enumerate(legal_mask_p2):
+          if a1 <= 0.5 or a2 <= 0.5:
+            continue
+          new_carries = get_new_carries(carry, jnp.asarray([a1i, a2i]), turn)
           for new_carry in new_carries:
+            #print("Appending new carry: ", new_carry)
             q.append((new_carry, turn + 1))
+      
+      visited.append(jnp.array_str(state))
+    #print("State visited")
+    #print(visited)
   return count_states_by_isets[0].values(), count_states_by_isets[1].values(), count_isets_by_public_state[0].values(), count_isets_by_public_state[1].values()
 
 
