@@ -115,7 +115,7 @@ def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: ch
   
   cluster_energy_repulsion = jnp.where(cluster_each_other_distance < 1e-8, 0, 1/(cluster_each_other_distance + 1e-9))
   
-  cluster_energy_repulsion = cluster_energy_repulsion * 0.015
+  cluster_energy_repulsion = cluster_energy_repulsion * 0.001
   cluster_energy_repulsion = jnp.mean(cluster_energy_repulsion)
   
   cluster_loss = jnp.mean(cluster_difference ** 2, axis=-1)
@@ -128,9 +128,11 @@ def _compute_soft_kmeans_loss_with_single(real: chex.Array, pred: chex.Array, pr
   # cluster_soft_assignement = jnp.where(cluster_soft_assignement >= jnp.max(cluster_soft_assignement, -1, keepdims=True), 1, 0)
   # prob_loss = optax.losses.softmax_cross_entropy(probs,  jax.lax.stop_gradient(cluster_soft_assignement))
   
-  cluster_hard_assignement = jnp.argmax(cluster_soft_assignement, axis=-1)
   
-  prob_loss = optax.softmax_cross_entropy_with_integer_labels(probs, cluster_hard_assignement)
+  # cluster_hard_assignement = jnp.argmax(cluster_soft_assignement, axis=-1)
+  cluster_smooth_assignment = jnp.where(cluster_soft_assignement >= jnp.max(cluster_soft_assignement, -1, keepdims=True), 0.95, 0.05)
+  
+  prob_loss = optax.softmax_cross_entropy(probs, cluster_smooth_assignment)
   prob_loss = prob_loss * valid
   
   
