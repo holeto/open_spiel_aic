@@ -111,9 +111,9 @@ def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: ch
   
   # energy_repulsion = pred  
   cluster_each_other_distance = pred[..., :, None, :] - pred[..., None, :, :]
-  cluster_each_other_distance = jnp.sum(cluster_each_other_distance ** 2, axis=-1)
+  cluster_each_other_distance = jnp.mean(cluster_each_other_distance ** 2, axis=-1)
   
-  cluster_energy_repulsion = jnp.where(cluster_each_other_distance < 1e-8, 0, 1/jnp.sqrt(cluster_each_other_distance + 1e-8))
+  cluster_energy_repulsion = jnp.where(cluster_each_other_distance < 1e-8, 0, 1/(cluster_each_other_distance + 1e-8))
   
   cluster_energy_repulsion = jnp.mean(cluster_energy_repulsion) * 0.01
   
