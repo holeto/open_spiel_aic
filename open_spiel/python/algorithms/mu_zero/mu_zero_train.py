@@ -283,8 +283,8 @@ class MuZeroTrain():
     p1_ps_decoder_optimizer = optax_optimizer(p1_ps_decoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_ps_decoder_optimizer = optax_optimizer(p2_ps_decoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     
-    p1_similarity_optimizer = optax_optimizer(p1_similarity_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=1e-4), optax.clip(1)))
-    p2_similarity_optimizer = optax_optimizer(p2_similarity_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=1e-4), optax.clip(1)))
+    p1_similarity_optimizer = optax_optimizer(p1_similarity_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(1)))
+    p2_similarity_optimizer = optax_optimizer(p2_similarity_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(1)))
     
     p1_legal_actions_optimizer = optax_optimizer(p1_legal_actions_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_legal_actions_optimizer = optax_optimizer(p2_legal_actions_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
@@ -294,8 +294,8 @@ class MuZeroTrain():
     mvs_optimizer = optax_optimizer(mvs_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     mvs_optimizer_target = optax_optimizer(mvs_params_target, optax.sgd(self.config.target_network_update))
     
-    p1_transformation_optimizer = optax_optimizer(p1_transformation_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
-    p2_transformation_optimizer = optax_optimizer(p2_transformation_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
+    p1_transformation_optimizer = optax_optimizer(p1_transformation_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(1)))
+    p2_transformation_optimizer = optax_optimizer(p2_transformation_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(1)))
     
     
     expected_optimizer = optax_optimizer(expected_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
@@ -1448,7 +1448,7 @@ class MuZeroTrain():
       similarity = jnp.concatenate(((timestep.legal * 2) - 1, sim_pi, v), axis=-1)
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY: 
       used_actions = jnp.tri(self.config.trajectory_max, self.config.trajectory_max, k=-1)
-      action = (timestep.action[None, ...] - 0.5) * 0.5
+      action = (timestep.action[None, ...] - 0.5) * 2 
       action = used_actions[..., None, None, None] * action
       action = jnp.moveaxis(action, 1, -2).reshape(*timestep.action.shape[:-1], -1) 
       similarity = action

@@ -106,6 +106,16 @@ def compute_energy_repulsion(pred: chex.Array):
   
   return jnp.mean(cluster_energy_repulsion)
 
+def compute_energy_repulsion_inverse(pred: chex.Array):
+  cluster_each_other_distance = pred[..., :, None, :] - pred[..., None, :, :]
+  cluster_each_other_distance = jnp.sum(cluster_each_other_distance ** 2, axis=-1)
+  
+  cluster_energy_repulsion = jnp.where(cluster_each_other_distance < 1e-8, 0, 1/(cluster_each_other_distance + 1e-9))
+  
+  cluster_energy_repulsion = jnp.mean(cluster_energy_repulsion)
+  return cluster_energy_repulsion
+
+
 def _compute_soft_kmeans_sqrt_loss(real:chex.Array, pred: chex.Array, valid: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float):
   chex.assert_shape((real,), (*pred.shape[:-2], pred.shape[-1]))
   cluster_difference = lax.stop_gradient(jnp.expand_dims(real, -2)) - pred
@@ -118,7 +128,9 @@ def _compute_soft_kmeans_sqrt_loss(real:chex.Array, pred: chex.Array, valid: che
   
   cluster_soft_assignement = compute_soft_assignments(cluster_distance, temperature, cluster_closeness_assignment, repulsive_force)
     
-  cluster_energy_repulsion = compute_energy_repulsion(pred) * 0.3
+
+    
+  cluster_energy_repulsion = compute_energy_repulsion_inverse(pred) * 0.01
   
   
   cluster_loss = jnp.mean(cluster_difference ** 2, axis=-1)
