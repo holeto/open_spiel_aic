@@ -359,6 +359,9 @@ class MuZeroTrain():
     self.learner_steps = 0
 
   def similarity_output_size(self):
+    
+    action_history_size = self.actions * (self.config.trajectory_max - 1)
+    
     if self.config.similarity_metric == SimilarityMetric.POLICY:
       return self.actions
     elif self.config.similarity_metric == SimilarityMetric.VALUE:
@@ -370,13 +373,13 @@ class MuZeroTrain():
     elif self.config.similarity_metric == SimilarityMetric.LEGAL_POLICY_VALUE:
       return 2 * self.actions + 1
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY:
-      return self.actions * self.config.trajectory_max
+      return action_history_size
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY_POLICY:
-      return self.actions * self.config.trajectory_max + self.actions
+      return action_history_size + self.actions
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY_LEGAL:
-      return self.actions * self.config.trajectory_max + self.actions
+      return action_history_size + self.actions
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY_LEGAL_POLICY:
-      return self.actions * self.config.trajectory_max + 2 * self.actions
+      return action_history_size + 2 * self.actions
     elif self.config.similarity_metric == SimilarityMetric.ISET_VECTOR:
       return self.game.information_state_tensor_shape()
     assert False, "Unknown similarity metric"   
