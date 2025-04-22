@@ -82,8 +82,27 @@ class NetworkParameters:
   
   q_critic_params: Params = ()
   q_critic_params_target: Params = ()
+
   
-  
+def similarity_policy(pi: chex.Array, scale: float = 2):
+  return (pi - 0.5) * scale
+
+def similarity_value(v: chex.Array, scale: float = 1):
+  return v * scale
+
+def similarity_legal(legal: chex.Array, scale: float = 2):
+  return (legal - 0.5) * scale
+
+def similarity_action_history(action: chex.Array, scale: float = 1):
+  used_actions = jnp.tri(action.shape[0], action.shape[0] - 1, k=-1)
+  scaled_action = (action[None, :-1, ...] - 0.5) * scale 
+  preceeding_actions = used_actions[..., None, None, None] * scaled_action
+  action_vector = jnp.moveaxis(preceeding_actions, 1, -2).reshape(*action.shape[:-1], -1) 
+  return action_vector
+
+def similarity_iset(iset: chex.Array, scale: float = 2):
+  return (iset - 0.5) * scale
+
 class SimilarityMetric(str, Enum):
   POLICY = "policy"
   VALUE = "value"
@@ -1433,58 +1452,41 @@ class MuZeroTrain():
     
     # v will not be used in future! Here it contains the regularized value function
     pi, v, _, _ = vectorized_net_apply(rnad_params, timestep.obs, timestep.legal)
-    sim_pi = (pi - 0.5) * 2
+
     if self.config.similarity_metric == SimilarityMetric.POLICY_VALUE:
-      similarity = jnp.concatenate((sim_pi, v), axis=-1)
-      # similarity = jnp.concatenate((pi, v), axis=-1)
+      sim_pi = similarity_policy(pi)
+      sim_v = similarity_value(v) 
+      similarity = jnp.concatenate((sim_pi, sim_v), axis=-1) 
     elif self.config.similarity_metric == SimilarityMetric.POLICY:
-      similarity = sim_pi
+      similarity = similarity_policy(pi)
     elif self.config.similarity_metric == SimilarityMetric.VALUE:
-      similarity = v
+      similarity = similarity_value(v)
     elif self.config.similarity_metric == SimilarityMetric.LEGAL_ACTIONS:
-      similarity = (timestep.legal * 2) - 1 # to be in range [-1, 1]
+      similarity = similarity_legal(timestep.legal)
     elif self.config.similarity_metric == SimilarityMetric.LEGAL_POLICY_VALUE:
       # TODO: Legal actions have half of the weights that policy has.
-      similarity = jnp.concatenate(((timestep.legal * 2) - 1, sim_pi, v), axis=-1)
+      sim_pi = similarity_policy(pi)
+      sim_v = similarity_value(v)
+      sim_legal = similarity_legal(timestep.legal)
+      similarity = jnp.concatenate((sim_legal, sim_pi, sim_v), axis=-1)
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY: 
-      used_actions = jnp.tri(self.config.trajectory_max, self.config.trajectory_max, k=-1)
-      action = (timestep.action[None, ...] - 0.5) * 2 
-      action = used_actions[..., None, None, None] * action
-      action = jnp.moveaxis(action, 1, -2).reshape(*timestep.action.shape[:-1], -1) 
-      similarity = action
+      action_history = similarity_action_history(timestep.action, 2)  
+      similarity = action_history
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY_POLICY: 
-      
-      # TODO: This can use Trajectory_max * trajectory_max - 1 instead, since the last action is never used
-      used_actions = jnp.tri(self.config.trajectory_max, self.config.trajectory_max, k=-1)
-      
-      action = (timestep.action[None, ...] - 0.5) * 2
-      action = used_actions[..., None, None, None] * action
-      action = jnp.moveaxis(action, 1, -2).reshape(*timestep.action.shape[:-1], -1) 
-      similarity = jnp.concatenate((action, sim_pi), axis=-1)
-    elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY_POLICY: 
-      
-      # TODO: This can use Trajectory_max * trajectory_max - 1 instead, since the last action is never used
-      used_actions = jnp.tri(self.config.trajectory_max, self.config.trajectory_max, k=-1)
-      
-      action = (timestep.action[None, ...] - 0.5) * 0.5
-      action = used_actions[..., None, None, None] * action
-      action = jnp.moveaxis(action, 1, -2).reshape(*timestep.action.shape[:-1], -1) 
-      similarity = jnp.concatenate((action, sim_pi), axis=-1)
-      # similarity = jnp.concatenate((timestep.legal - 0.5, (pi * 2) - 1, v), axis=-1)
+      sim_pi = similarity_policy(pi)
+      action_history = similarity_action_history(timestep.action, 0.5)  
+      similarity = jnp.concatenate((action_history, sim_pi), axis=-1)
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY_LEGAL:
-      used_actions = jnp.tri(self.config.trajectory_max, self.config.trajectory_max, k=-1)
-      action = (timestep.action[None, ...] - 0.5) * 0.5 
-      action = used_actions[..., None, None, None] * action
-      action = jnp.moveaxis(action, 1, -2).reshape(*timestep.action.shape[:-1], -1) 
-      similarity = jnp.concatenate((action, (timestep.legal * 2) - 1), axis=-1)
+      action_history = similarity_action_history(timestep.action, 0.5) 
+      sim_legal = similarity_legal(timestep.legal)
+      similarity = jnp.concatenate((action_history, sim_legal), axis=-1)
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY_LEGAL_POLICY:
-      used_actions = jnp.tri(self.config.trajectory_max, self.config.trajectory_max, k=-1)
-      action = (timestep.action[None, ...] - 0.5) * 0.5 
-      action = used_actions[..., None, None, None] * action
-      action = jnp.moveaxis(action, 1, -2).reshape(*timestep.action.shape[:-1], -1) 
-      similarity = jnp.concatenate((action, (timestep.legal * 2) - 1, sim_pi), axis=-1)
-    elif self.config.similarity_metric == SimilarityMetric.ISET_VECTOR:
-      similarity = (timestep.obs * 2) - 1
+      sim_pi = similarity_policy(pi)
+      action_history = similarity_action_history(timestep.action, 0.5)
+      sim_legal = similarity_legal(timestep.legal)
+      similarity = jnp.concatenate((action_history, sim_legal, sim_pi), axis=-1)
+    elif self.config.similarity_metric == SimilarityMetric.ISET_VECTOR: 
+      similarity = similarity_iset(timestep.obs) 
     
     abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers, abstraction_loss = self.update_abstraction(
       network_parameters.abstraction_params,
@@ -1971,7 +1973,7 @@ def main():
   mu = True
   if mu == True:
     
-    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=8, trajectory_max=game.max_trajectory_length(), use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,), dynamics_type="public_state", similarity_metric="action_history_legal_policy"))
+    muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=256, trajectory_max=game.max_trajectory_length(), use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,), dynamics_type="public_state", similarity_metric="action_history_legal_policy"))
     
     # muzero = MuZeroTrain(game, MuZeroTrainConfig(batch_size=128, trajectory_max=cards - 1, use_abstraction=True, sampling_epsilon=0.0, entropy_schedule_size=(3000,), dynamics_type="public_state", similarity_metric="legal_actions"))
     # muzero.rng_key = jax.random.PRNGKey(42)
