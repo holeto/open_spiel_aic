@@ -162,8 +162,8 @@ def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: ch
   cluster_difference = cluster_difference * valid[..., None, None]
   
   cluster_distance = jnp.sum(cluster_difference ** 2, axis=-1)
-  cluster_distance = cluster_distance + (cluster_distance < 1e-15)
-  cluster_distance = cluster_distance ** 0.5
+  # cluster_distance = cluster_distance + (cluster_distance < 1e-15)
+  # cluster_distance = cluster_distance ** 0.5
   
   # cluster_loss = jax.nn.logsumexp(cluster_distance, axis=-1)
   
