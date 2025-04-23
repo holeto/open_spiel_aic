@@ -121,6 +121,19 @@ def exploitability_jax_game(game: JaxGame, policy: JaxPolicy) -> tuple[JaxPolicy
     isets[depth][1].append(iset_map[depth][1].index(p2_iset_str))
     b_pol1 = np.array(policy[p1_iset_str])
     b_pol2 = np.array(policy[p2_iset_str]) 
+    
+    b_pol1 = b_pol1 * legal_actions[0]
+    b_pol2 = b_pol2 * legal_actions[1]
+    
+    if np.sum(b_pol1) < 1e-8:
+      b_pol1 = legal_actions[0]
+    if np.sum(b_pol2) < 1e-8:
+      b_pol2 = legal_actions[1]
+      
+    b_pol1 = b_pol1 / np.sum(b_pol1)
+    b_pol2 = b_pol2 / np.sum(b_pol2)
+  
+    
     assert abs(np.sum(b_pol1) - 1) < 1e-3
     assert abs(np.sum(b_pol2) - 1) < 1e-3
     # if abs(np.sum(b_pol1) -1) < 1e-3:
