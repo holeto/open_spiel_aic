@@ -1492,7 +1492,7 @@ class MuZeroTrain():
     elif self.config.similarity_metric == SimilarityMetric.ISET_VECTOR: 
       similarity = similarity_iset(timestep.obs) 
       
-    similarity = similarity + jax.random.normal(rng_key, similarity.shape) * 0.03
+    similarity = similarity + jax.random.normal(rng_key, similarity.shape) * 0.1
     
     abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers, abstraction_loss = self.update_abstraction(
       network_parameters.abstraction_params,
