@@ -1408,7 +1408,8 @@ class MuZeroTrain():
     optimizers: Optimizers,
     timestep: TimeStep,
     alpha: float,
-    update_net: bool
+    update_net: bool,
+    rng_key: jax.random.PRNGKey
   ):
     
     expected_params, expected_params_target, optimizers, expected_loss = self.update_expected(
@@ -1490,6 +1491,8 @@ class MuZeroTrain():
       similarity = jnp.concatenate((action_history, sim_legal, sim_pi), axis=-1)
     elif self.config.similarity_metric == SimilarityMetric.ISET_VECTOR: 
       similarity = similarity_iset(timestep.obs) 
+      
+    similarity = similarity + jax.random.normal(rng_key, similarity.shape) * 0.03
     
     abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers, abstraction_loss = self.update_abstraction(
       network_parameters.abstraction_params,
@@ -1596,11 +1599,13 @@ class MuZeroTrain():
     alpha,
     update_net, 
   ):
-    key = jax.random.split(key, self.config.batch_size)
-    sample_trajectories = jax.vmap(self.sample_trajectory, in_axes=(None, 0), out_axes=1)
-    trajectory = sample_trajectories(network_parameters.rnad_params, key)  
     
-    return self.update_parameters(network_parameters, optimizers, lax.stop_gradient(trajectory), alpha, update_net)
+    trajectory_key, update_key = jax.random.split(key)
+    trajectory_key = jax.random.split(trajectory_key, self.config.batch_size)
+    sample_trajectories = jax.vmap(self.sample_trajectory, in_axes=(None, 0), out_axes=1)
+    trajectory = sample_trajectories(network_parameters.rnad_params, trajectory_key)  
+    
+    return self.update_parameters(network_parameters, optimizers, lax.stop_gradient(trajectory), alpha, update_net, update_key)
    
   @functools.partial(jax.jit, static_argnums=(0, 4))
   def get_loss_value(
