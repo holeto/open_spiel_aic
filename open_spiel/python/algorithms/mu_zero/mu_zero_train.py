@@ -302,8 +302,8 @@ class MuZeroTrain():
     p1_ps_decoder_optimizer = optax_optimizer(p1_ps_decoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_ps_decoder_optimizer = optax_optimizer(p2_ps_decoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     
-    p1_similarity_optimizer = optax_optimizer(p1_similarity_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=0.0), optax.clip(1)))
-    p2_similarity_optimizer = optax_optimizer(p2_similarity_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=0.0), optax.clip(1)))
+    p1_similarity_optimizer = optax_optimizer(p1_similarity_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=1e-5), optax.clip(1)))
+    p2_similarity_optimizer = optax_optimizer(p2_similarity_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=1e-5), optax.clip(1)))
     
     p1_legal_actions_optimizer = optax_optimizer(p1_legal_actions_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_legal_actions_optimizer = optax_optimizer(p2_legal_actions_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))

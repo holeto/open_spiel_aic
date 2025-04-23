@@ -162,21 +162,21 @@ def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: ch
   cluster_difference = cluster_difference * valid[..., None, None]
   
   cluster_distance = jnp.sum(cluster_difference ** 2, axis=-1)
-  # cluster_distance = cluster_distance + (cluster_distance < 1e-15)
-  # cluster_distance = cluster_distance ** 0.5
+  cluster_distance = cluster_distance + (cluster_distance < 1e-15)
+  cluster_distance = cluster_distance ** 0.5
   
   # cluster_loss = jax.nn.logsumexp(cluster_distance, axis=-1)
   
   cluster_soft_assignement = compute_soft_assignments(cluster_distance, temperature, cluster_closeness_assignment, repulsive_force)
 
-  cluster_energy_repulsion = compute_energy_repulsion(pred) * 0.001
-  # cluster_separation_loss = compute_separation_loss(pred, cluster_closeness_assignment) * 0.2
-  # cluster_pullback_loss = pullback_loss(pred) * 0.001
+  # cluster_energy_repulsion = compute_energy_repulsion(pred) * 0.001
+  cluster_separation_loss = compute_separation_loss(pred, cluster_closeness_assignment) * 0.2
+  cluster_pullback_loss = pullback_loss(pred) * 0.0001
   
   cluster_loss = jnp.mean(cluster_difference ** 2, axis=-1)
   cluster_loss = jnp.sum(cluster_loss * cluster_soft_assignement, axis=-1) * valid 
   
-  return jnp.mean(cluster_loss) + cluster_energy_repulsion, cluster_soft_assignement
+  return jnp.mean(cluster_loss) + cluster_separation_loss + cluster_pullback_loss, cluster_soft_assignement
   
 def _compute_soft_kmeans_loss_with_single(real: chex.Array, pred: chex.Array, probs: chex.Array, valid: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float):
   cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred, valid, temperature, cluster_closeness_assignment, repulsive_force)
