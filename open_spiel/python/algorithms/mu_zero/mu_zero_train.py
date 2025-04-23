@@ -7,7 +7,7 @@ from open_spiel.python.policy import TabularPolicy
 from open_spiel.python.algorithms.exploitability import exploitability
 
 from open_spiel.python.algorithms.mu_zero.muzero_networks import MAVSNetwork, SimilarityNetwork, LegalActionsNetwork, PublicStateEncoder, InfosetEncoder, PublicStateDynamicsNetwork, DynamicsNetwork, TransformationNetwork, QCriticNetwork, ExpectedNetwork, RNaDNetwork, PublicStateDecoder
-from open_spiel.python.algorithms.mu_zero.train_utils import _policy_ratio,   neurd_loss, transform_trajectory_to_last_dimension, normalize_direction_with_mask,  _compute_soft_kmeans_loss_with_cluster_assignments, _compute_soft_kmeans_loss_with_single, state_v_trace, expected_v_trace, v_trace
+from open_spiel.python.algorithms.mu_zero.train_utils import _policy_ratio,   neurd_loss, transform_trajectory_to_last_dimension, normalize_direction_with_mask,  _compute_soft_kmeans_loss_with_cluster_assignments, _compute_soft_kmeans_loss_with_single, state_v_trace, expected_v_trace, v_trace, compute_soft_kmeans_transformations
 
 from typing import Sequence, Any, Callable
 from pyinstrument import Profiler
@@ -302,8 +302,8 @@ class MuZeroTrain():
     p1_ps_decoder_optimizer = optax_optimizer(p1_ps_decoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_ps_decoder_optimizer = optax_optimizer(p2_ps_decoder_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     
-    p1_similarity_optimizer = optax_optimizer(p1_similarity_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=1e-4), optax.clip(1)))
-    p2_similarity_optimizer = optax_optimizer(p2_similarity_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=1e-4), optax.clip(1)))
+    p1_similarity_optimizer = optax_optimizer(p1_similarity_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=0.0), optax.clip(1)))
+    p2_similarity_optimizer = optax_optimizer(p2_similarity_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=0.0), optax.clip(1)))
     
     p1_legal_actions_optimizer = optax_optimizer(p1_legal_actions_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     p2_legal_actions_optimizer = optax_optimizer(p2_legal_actions_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
@@ -313,8 +313,8 @@ class MuZeroTrain():
     mvs_optimizer = optax_optimizer(mvs_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
     mvs_optimizer_target = optax_optimizer(mvs_params_target, optax.sgd(self.config.target_network_update))
     
-    p1_transformation_optimizer = optax_optimizer(p1_transformation_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=1e-4), optax.clip(1)))
-    p2_transformation_optimizer = optax_optimizer(p2_transformation_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=1e-4), optax.clip(1)))
+    p1_transformation_optimizer = optax_optimizer(p1_transformation_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=0.0), optax.clip(1)))
+    p2_transformation_optimizer = optax_optimizer(p2_transformation_params, optax.chain(optax.adamw(self.config.learning_rate, weight_decay=0.0), optax.clip(1)))
     
     
     expected_optimizer = optax_optimizer(expected_params, optax.chain(optax.adam(self.config.learning_rate), optax.clip(100)))
@@ -894,7 +894,7 @@ class MuZeroTrain():
     update_direction = transform_trajectory_to_last_dimension(update_direction)
     valid_clusters = jnp.ones(1)
     
-    loss, _ = _compute_soft_kmeans_loss_with_cluster_assignments(update_direction,
+    loss, _ = compute_soft_kmeans_transformations(update_direction,
                                                                  predicted_direction,
                                                                  valid_clusters,
                                                                  self.config.transformation_soft_k_means_temperature,
