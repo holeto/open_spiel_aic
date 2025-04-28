@@ -1229,7 +1229,7 @@ class MuZeroTrain():
     terminal_loss = jnp.sum(terminal_loss) / (normalization + (normalization == 0))
     
     # return reward_loss + terminal_loss
-    return ps_loss + p1_iset_loss + p2_iset_loss + reward_loss +  terminal_loss
+    return ps_loss + p1_iset_loss + p2_iset_loss + reward_loss * 5 +  terminal_loss * 3
       
       
   def update_rnad(

@@ -719,8 +719,10 @@ def solve_game_per_depth(model: MuZeroTrain, resolve_iterations: int = 1000, dep
     p1_iset_legals = np.array(p1_iset_legals)
     p2_iset_legals = np.array(p2_iset_legals)
     
-    p1_iset_legals = np.where(p1_iset_legals > 0, 1.0, 0.0)
-    p2_iset_legals = np.where(p2_iset_legals > 0, 1.0, 0.0)
+    legal_threshold = 0.0
+    
+    p1_iset_legals = np.where(p1_iset_legals > legal_threshold, 1.0, 0.0)
+    p2_iset_legals = np.where(p2_iset_legals > legal_threshold, 1.0, 0.0)
     iset_legals = [p1_iset_legals, p2_iset_legals]
     
     p1_history_legals, p2_history_legals = model.get_both_legal_actions_from_abstraction(isets[0], isets[1])
@@ -728,8 +730,8 @@ def solve_game_per_depth(model: MuZeroTrain, resolve_iterations: int = 1000, dep
     p1_history_legals = np.array(p1_history_legals)
     p2_history_legals = np.array(p2_history_legals)
     
-    p1_history_legals = np.where(p1_history_legals > 0, 1.0, 0.0)
-    p2_history_legals = np.where(p2_history_legals > 0, 1.0, 0.0)
+    p1_history_legals = np.where(p1_history_legals > legal_threshold, 1.0, 0.0)
+    p2_history_legals = np.where(p2_history_legals > legal_threshold, 1.0, 0.0)
     
     history_legals = p1_history_legals[..., None] * p2_history_legals[..., None, :]
     
