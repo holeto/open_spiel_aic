@@ -31,6 +31,7 @@ def train(args, game, trajectory_max, save_folder):
     abstraction_amount=args.abstraction_amount,
     abstraction_size=args.abstraction_size,
     similarity_metric=args.similarity_metric,
+    similarity_noise=args.similarity_noise,
     
     
     abstraction_soft_k_means_temperature=args.abstraction_soft_k_means_temperature,

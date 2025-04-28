@@ -108,6 +108,7 @@ class SimilarityMetric(str, Enum):
   VALUE = "value"
   POLICY_VALUE = "policy_value"
   LEGAL_ACTIONS = "legal_actions"
+  LEGAL_POLICY = "legal_policy"
   LEGAL_POLICY_VALUE = "legal_policy_value"
   ACTION_HISTORY = "action_history"
   ACTION_HISTORY_POLICY = "action_history_policy"
@@ -139,6 +140,7 @@ class MuZeroTrainConfig:
   abstraction_amount: int = 10
   abstraction_size: int = 32
   similarity_metric: SimilarityMetric = SimilarityMetric.POLICY_VALUE
+  similarity_noise: float = 0.02
   
   abstraction_soft_k_means_temperature: float = 1.0
   abstraction_soft_k_means_closeness_assignment: float = 0.5
@@ -370,6 +372,8 @@ class MuZeroTrain():
       return self.actions + 1
     elif self.config.similarity_metric == SimilarityMetric.LEGAL_ACTIONS:
       return self.actions
+    elif self.config.similarity_metric == SimilarityMetric.LEGAL_POLICY:
+      return 2 * self.actions
     elif self.config.similarity_metric == SimilarityMetric.LEGAL_POLICY_VALUE:
       return 2 * self.actions + 1
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY:
@@ -1467,11 +1471,15 @@ class MuZeroTrain():
       similarity = similarity_value(v)
     elif self.config.similarity_metric == SimilarityMetric.LEGAL_ACTIONS:
       similarity = similarity_legal(timestep.legal)
+    elif self.config.similarity_metric == SimilarityMetric.LEGAL_POLICY:
+      sim_pi = similarity_policy(pi)
+      sim_legal = similarity_legal(timestep.legal, 1)
+      similarity = jnp.concatenate((sim_legal, sim_pi), axis=-1)
     elif self.config.similarity_metric == SimilarityMetric.LEGAL_POLICY_VALUE:
       # TODO: Legal actions have half of the weights that policy has.
       sim_pi = similarity_policy(pi)
       sim_v = similarity_value(v)
-      sim_legal = similarity_legal(timestep.legal)
+      sim_legal = similarity_legal(timestep.legal, 1)
       similarity = jnp.concatenate((sim_legal, sim_pi, sim_v), axis=-1)
     elif self.config.similarity_metric == SimilarityMetric.ACTION_HISTORY: 
       action_history = similarity_action_history(timestep.action, 2)  
@@ -1492,7 +1500,7 @@ class MuZeroTrain():
     elif self.config.similarity_metric == SimilarityMetric.ISET_VECTOR: 
       similarity = similarity_iset(timestep.obs) 
       
-    similarity = similarity + jax.random.normal(rng_key, similarity.shape) * 0.1
+    similarity = similarity + jax.random.normal(rng_key, similarity.shape) * self.config.similarity_noise
     
     abstraction_params, ps_decoder_params, iset_encoder_params, similarity_params, optimizers, abstraction_loss = self.update_abstraction(
       network_parameters.abstraction_params,

@@ -10,7 +10,7 @@ parser = argparse.ArgumentParser()
 
 # Training setting
 parser.add_argument("--save_each", type=int, default=1000, help="Save network each amount of iterations")
-parser.add_argument("--iterations", type=int, default=30, help="MuZero network training iterations,  the whole algorithm will run for --iterations * --save_each")
+parser.add_argument("--iterations", type=int, default=40, help="MuZero network training iterations,  the whole algorithm will run for --iterations * --save_each")
 parser.add_argument("--save_folder", type=str, default="muzero_networks", help="Path to the saved trained networks")
 
 # Algorithm setting
@@ -27,10 +27,11 @@ parser.add_argument("--train_legal_actions", type=bool, default=True, help="Trai
 parser.add_argument("--use_abstraction", type=bool, default=True, help="Use abstraction")
 parser.add_argument("--abstraction_amount", type=int, default=10, help="Abstraction amount")
 parser.add_argument("--abstraction_size", type=int, default=32, help="Abstraction size")
-parser.add_argument("--similarity_metric", type=str, default="legal_actions", help="Similarity metric. Choices: policy, value, policy_value, legal_actions, legal_policy_value")
+parser.add_argument("--similarity_metric", type=str, default="action_history", help="Similarity metric. Choices: policy, value, policy_value, legal_actions, legal_policy, legal_policy_value, action_history, action_history_policy, action_history_legal, action_history_legal_policy")
+parser.add_argument("--similarity_noise", type=float, default=0.02, help="Similarity noise")
 
 parser.add_argument("--abstraction_soft_k_means_temperature", type=float, default=1.0, help="Abstraction soft k means temperature")
-parser.add_argument("--abstraction_soft_k_means_closeness_assignment", type=float, default=0.5, help="Abstraction soft k means closeness assignment")
+parser.add_argument("--abstraction_soft_k_means_closeness_assignment", type=float, default=1.0, help="Abstraction soft k means closeness assignment")
 parser.add_argument("--abstraction_soft_k_means_repulsive_force", type=float, default=3.0, help="Abstraction soft k means repulsive force")
 parser.add_argument("--transformation_soft_k_means_temperature", type=float, default=1.0, help="Transformation soft k means temperature")
 parser.add_argument("--transformation_soft_k_means_closeness_assignment", type=float, default=0.5, help="Transformation soft k means closeness assignment")
@@ -41,12 +42,12 @@ parser.add_argument("--dynamics_type", type=str, default="public_state", help="T
 parser.add_argument("--ps_encoder_hidden_size", type=int, default=256, help="PS encoder hidden size")
 parser.add_argument("--ps_decoder_hidden_size", type=int, default=64, help="PS decoder hidden size")
 parser.add_argument("--iset_hidden_size", type=int, default=64, help="ISet hidden size")
-parser.add_argument("--dynamics_hidden_size", type=int, default=256, help="Dynamics hidden size")
-parser.add_argument("--similarity_hidden_size", type=int, default=64, help="Similarity hidden size")
-parser.add_argument("--mvs_hidden_size", type=int, default=256, help="MVS hidden size")
+parser.add_argument("--dynamics_hidden_size", type=int, default=128, help="Dynamics hidden size")
+parser.add_argument("--similarity_hidden_size", type=int, default=128, help="Similarity hidden size")
+parser.add_argument("--mvs_hidden_size", type=int, default=128, help="MVS hidden size")
 parser.add_argument("--legal_actions_hidden_size", type=int, default=64, help="Legal actions hidden size")
-parser.add_argument("--transformation_hidden_size", type=int, default=256, help="Transformation hidden size")
-parser.add_argument("--rnad_hidden_size", type=int, default=256, help="RNAD hidden size")
+parser.add_argument("--transformation_hidden_size", type=int, default=128, help="Transformation hidden size")
+parser.add_argument("--rnad_hidden_size", type=int, default=128, help="RNAD hidden size")
 
 parser.add_argument("--transformations", type=int, default=10, help="Number of transformations")
 parser.add_argument("--matrix_valued_states", type=bool, default=True, help="Matrix valued states")
@@ -62,10 +63,10 @@ parser.add_argument("--entropy_schedule_size", type=int, nargs='+', default=[200
 
 parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate")
 parser.add_argument("--target_network_update", type=float, default=1e-3, help="Target network update")
-parser.add_argument("--seed", type=int, default=134, help="Random seed, use 0 to have totally random seed")
+parser.add_argument("--seed", type=int, default=111131, help="Random seed, use 0 to have totally random seed")
 
 #Game setting:
-parser.add_argument("--cards", type=int, default=3, help="Goofspiel cards")
+parser.add_argument("--cards", type=int, default=4, help="Goofspiel cards")
 parser.add_argument("--points_order", type=str, default="descending", help="Goofspiel type, choices are descending and previous")
 
 def main(): 
