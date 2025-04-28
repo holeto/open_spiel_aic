@@ -188,6 +188,7 @@ def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: ch
   
   cluster_loss = jnp.mean(cluster_difference ** 2, axis=-1)
   cluster_loss = jnp.sum(cluster_loss * cluster_soft_assignement, axis=-1) * valid 
+  cluster_loss = cluster_loss * jnp.sqrt(pred.shape[-2])
   
   return jnp.mean(cluster_loss) + cluster_separation_loss + cluster_pullback_loss, cluster_soft_assignement
   
