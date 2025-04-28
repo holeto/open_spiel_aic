@@ -32,8 +32,8 @@ def main():
     sampling_epsilon = model.config.sampling_epsilon,
     
     train_rnad = False,
-    train_mvs = model.config.train_mvs,
     train_transformations = False,
+    train_mvs = model.config.train_mvs,
     train_abstraction = model.config.train_abstraction,
     train_dynamics = model.config.train_dynamics,
     train_legal_actions = model.config.train_legal_actions,
@@ -43,14 +43,17 @@ def main():
     abstraction_amount = model.config.abstraction_amount,
     abstraction_size = model.config.abstraction_size,
     similarity_metric = model.config.similarity_metric,
+    similarity_noise = model.config.similarity_noise,
+    
     abstraction_soft_k_means_temperature = model.config.abstraction_soft_k_means_temperature,
     abstraction_soft_k_means_closeness_assignment = model.config.abstraction_soft_k_means_closeness_assignment,
     abstraction_soft_k_means_repulsive_force = model.config.abstraction_soft_k_means_repulsive_force,
-    transformation_soft_k_means_temperature
-    = model.config.transformation_soft_k_means_temperature,
+    transformation_soft_k_means_temperature = model.config.transformation_soft_k_means_temperature,
     transformation_soft_k_means_closeness_assignment = model.config.transformation_soft_k_means_closeness_assignment,
     transformation_soft_k_means_repulsive_force = model.config.transformation_soft_k_means_repulsive_force,
+    
     dynamics_type = model.config.dynamics_type,
+    
     ps_encoder_hidden_size = model.config.ps_encoder_hidden_size,
     ps_decoder_hidden_size = model.config.ps_decoder_hidden_size,
     iset_hidden_size = model.config.iset_hidden_size,
@@ -60,15 +63,19 @@ def main():
     legal_actions_hidden_size = model.config.legal_actions_hidden_size,
     transformation_hidden_size = model.config.transformation_hidden_size,
     rnad_hidden_size = model.config.rnad_hidden_size,
+    
     transformations = model.config.transformations,
     matrix_valued_states = model.config.matrix_valued_states,
+    
     c_iset_vtrace = model.config.c_iset_vtrace,
     rho_iset_vtrace = model.config.rho_iset_vtrace,
     c_state_vtrace = model.config.c_state_vtrace,
     rho_state_vtrace = model.config.rho_state_vtrace,
+    
     eta_regularization = model.config.eta_regularization,
     entropy_schedule_repeats = model.config.entropy_schedule_repeats,
     entropy_schedule_size = model.config.entropy_schedule_size,
+    
     learning_rate = model.config.learning_rate,
     target_network_update = model.config.target_network_update,
     seed = model.config.seed
