@@ -37,6 +37,7 @@ def train(args, game, trajectory_max, save_folder):
     abstraction_soft_k_means_temperature=args.abstraction_soft_k_means_temperature,
     abstraction_soft_k_means_closeness_assignment=args.abstraction_soft_k_means_closeness_assignment,
     abstraction_soft_k_means_repulsive_force=args.abstraction_soft_k_means_repulsive_force,
+    abstraction_hard_k_means_closeness=args.abstraction_hard_k_means_closeness,
     transformation_soft_k_means_temperature=args.transformation_soft_k_means_temperature,
     transformation_soft_k_means_closeness_assignment=args.transformation_soft_k_means_closeness_assignment,
     transformation_soft_k_means_repulsive_force=args.transformation_soft_k_means_repulsive_force,

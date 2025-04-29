@@ -33,6 +33,7 @@ parser.add_argument("--similarity_noise", type=float, default=0.02, help="Simila
 parser.add_argument("--abstraction_soft_k_means_temperature", type=float, default=1.0, help="Abstraction soft k means temperature")
 parser.add_argument("--abstraction_soft_k_means_closeness_assignment", type=float, default=1.0, help="Abstraction soft k means closeness assignment")
 parser.add_argument("--abstraction_soft_k_means_repulsive_force", type=float, default=3.0, help="Abstraction soft k means repulsive force")
+parser.add_argument("--abstraction_hard_k_means_closeness", type=float, default=0.2, help="Abstraction hard k means closeness")
 parser.add_argument("--transformation_soft_k_means_temperature", type=float, default=1.0, help="Transformation soft k means temperature")
 parser.add_argument("--transformation_soft_k_means_closeness_assignment", type=float, default=0.5, help="Transformation soft k means closeness assignment")
 parser.add_argument("--transformation_soft_k_means_repulsive_force", type=float, default=3.0, help="Transformation soft k means repulsive force")  

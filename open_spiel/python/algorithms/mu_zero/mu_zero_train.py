@@ -145,6 +145,7 @@ class MuZeroTrainConfig:
   abstraction_soft_k_means_temperature: float = 1.0
   abstraction_soft_k_means_closeness_assignment: float = 0.5
   abstraction_soft_k_means_repulsive_force: float = 3.0
+  abstraction_hard_k_means_closeness: float = 0.2
   transformation_soft_k_means_temperature: float = 1.0
   transformation_soft_k_means_closeness_assignment: float = 0.5
   transformation_soft_k_means_repulsive_force: float = 3.0
@@ -1017,7 +1018,8 @@ class MuZeroTrain():
                                                  valid,
                                                  self.config.abstraction_soft_k_means_temperature, 
                                                  self.config.abstraction_soft_k_means_closeness_assignment,
-                                                 self.config.abstraction_soft_k_means_repulsive_force
+                                                 self.config.abstraction_soft_k_means_repulsive_force,
+                                                 self.config.abstraction_hard_k_means_closeness
                                                  ) + ps_loss
     
   def non_abstracted_legal_actions_loss(self,
