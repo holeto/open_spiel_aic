@@ -94,7 +94,7 @@ def compute_soft_assignments(cluster_distance: chex.Array, temperature: float, c
   # soft_assignment = _legal_policy(-cluster_distance, nulled_clusters)
   return soft_assignments
 
-def compute_soft_hard_assignment(cluster_distance: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float):
+def compute_soft_hard_assignment(cluster_distance: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float, hard_k_means_closeness: float):
   '''Computes a soft-assignments to soft k-means (fuzzy c-means). This is not the original method. When more than 1 point is too close to the center, we only move the closest one.'''
   closest = jnp.min(cluster_distance, -1, keepdims=True)
   # nulled_clusters = jnp.where(jnp.logical_and(cluster_distance < cluster_closeness_assignment, cluster_distance > closest + 1e-10), 0, 1)
@@ -103,7 +103,7 @@ def compute_soft_hard_assignment(cluster_distance: chex.Array, temperature: floa
   hard_assignments = (cluster_distance <= (closest + 1e-10)).astype(jnp.float32)
   
   
-  assignments = jnp.where(closest < 0.5, hard_assignments, soft_assignments)
+  assignments = jnp.where(closest < hard_k_means_closeness, hard_assignments, soft_assignments)
 
   
   # soft_assignment = _legal_policy(-cluster_distance, nulled_clusters)
@@ -167,7 +167,7 @@ def compute_soft_kmeans_transformations(real:chex.Array, pred: chex.Array, valid
   
   
 # TODO: This should take valid into account
-def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: chex.Array, valid: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float):
+def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: chex.Array, valid: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float, hard_k_means_closeness: float):
   # The predicted dimension is missing
   chex.assert_shape((real,), (*pred.shape[:-2], pred.shape[-1]))
   cluster_difference = lax.stop_gradient(jnp.expand_dims(real, -2)) - pred
@@ -180,7 +180,7 @@ def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: ch
   
   # cluster_loss = jax.nn.logsumexp(cluster_distance, axis=-1)
   
-  cluster_soft_assignement = compute_soft_hard_assignment(cluster_distance, temperature, cluster_closeness_assignment, repulsive_force)
+  cluster_soft_assignement = compute_soft_hard_assignment(cluster_distance, temperature, cluster_closeness_assignment, repulsive_force, hard_k_means_closeness)
 
   # cluster_energy_repulsion = compute_energy_repulsion(pred) * 0.001
   cluster_separation_loss = compute_separation_loss(pred, cluster_closeness_assignment) * 0.2
@@ -192,8 +192,8 @@ def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: ch
   
   return jnp.mean(cluster_loss) + cluster_separation_loss + cluster_pullback_loss, cluster_soft_assignement
   
-def _compute_soft_kmeans_loss_with_single(real: chex.Array, pred: chex.Array, probs: chex.Array, valid: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float):
-  cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred, valid, temperature, cluster_closeness_assignment, repulsive_force)
+def _compute_soft_kmeans_loss_with_single(real: chex.Array, pred: chex.Array, probs: chex.Array, valid: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float, hard_k_means_closeness: float):
+  cluster_loss, cluster_soft_assignement = _compute_soft_kmeans_loss_with_cluster_assignments(real, pred, valid, temperature, cluster_closeness_assignment, repulsive_force, hard_k_means_closeness)
   
   
   # cluster_soft_assignement = jnp.where(cluster_soft_assignement >= jnp.max(cluster_soft_assignement, -1, keepdims=True), 1, 0)
