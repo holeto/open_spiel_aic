@@ -1,6 +1,9 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 import chex
+
+from jax.experimental.host_callback import id_print
 
 import functools
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame, GameState
@@ -65,7 +68,7 @@ class JaxLeduc(JaxGame):
     return self.total_cards + 1 + (self.max_turns - 1) * (self.num_actions - 1)
   
   def generate_all_private_card_nodes(self) :
-    """ Get a list of all game states corresponding
+    """ Get a jnp.array of all game states corresponding
     to all the outcomes of the first chance node
     and their legal actions (all the root states have the
     same legal actions.)
@@ -109,6 +112,32 @@ class JaxLeduc(JaxGame):
                                       )
       outcomes.append(new_game_state)
     return outcomes
+  
+  def generate_pc_nodes_and_mask(self, state:LeducGameState):
+    """Generate all public card nodes 
+    even those that are not possible and
+    return a validity mask of them.
+    The sampled outcome is always first on the list,
+    but will be generated in the list again,
+    so the shapes are one more than the chance node outcomes.
+    Used for vmap."""
+    outcomes = []
+    valid = jnp.ones(self.total_cards)
+    p1_card_oh = jax.nn.one_hot(state.private_cards[0], self.total_cards)
+    p2_card_oh = jax.nn.one_hot(state.private_cards[1], self.total_cards)
+    #curr_state_pc_oh = jax.nn.one_hot(state.public_card[0], self.total_cards + 1)
+    valid = valid - p1_card_oh - p2_card_oh #- curr_state_pc_oh
+    #outcomes = [state]
+    for pc in range(self.total_cards):
+      new_game_state = LeducGameState(action_history = state.action_history,
+                                      current_chips = state.current_chips,
+                                      private_cards = state.private_cards,
+                                      public_card = jnp.array([pc + 1]),
+                                      turns_this_round = state.turns_this_round,
+                                      terminal = state.terminal
+                                      )
+      outcomes.append(new_game_state)
+    return outcomes, valid
        
   
   @functools.partial(jax.jit, static_argnums=(0))
@@ -159,6 +188,91 @@ class JaxLeduc(JaxGame):
     state_tensor = jnp.concatenate([private_cards_oh.ravel(), public_state_tensor], axis=0)
 
     return state_tensor, p1_iset_tensor, p2_iset_tensor, public_state_tensor
+  
+  def reconstruct_state_from_isets(self, p1_iset_tensor, p2_iset_tensor):
+    """Return a LeducGameState corresponding to the union of information
+      contained within the two isets and legal actions in that state"""
+    #
+    private_cards = jnp.arange(self.total_cards)
+    actions = jnp.arange(self.num_actions - 1)
+    public_cards = jnp.arange(self.total_cards + 1)
+    p1_priv_card = jnp.sum(p1_iset_tensor[2:self.total_cards + 2] * private_cards)
+    p2_priv_card = jnp.sum(p2_iset_tensor[2:self.total_cards + 2] * private_cards)
+    fold_oh = jax.nn.one_hot(FOLD_ID, self.num_actions)
+    raise_oh = jax.nn.one_hot(RAISE_ID, self.num_actions)
+    invalid_legals = jax.nn.one_hot(INVALID_ID, self.num_actions)
+    public_card = jnp.sum(p1_iset_tensor[self.total_cards + 2 :2 * self.total_cards + 3] * public_cards)
+    start = 2* self.total_cards + 3
+    action_history = jnp.reshape(p1_iset_tensor[start: ], (self.max_turns - 1, self.num_actions - 1))
+    round = 0
+    turns_this_round = 0
+    terminal = False
+    bets_equal = True
+    num_raises = 0
+    current_chips = np.array([1, 1])
+    @chex.dataclass(frozen=True)
+    class TurnInfo:
+      current_chips : chex.Array
+      turns_this_round: int
+      round: int
+      bets_equal: bool
+      terminal: bool
+      num_raises: int
+    cur_turn_info = TurnInfo(current_chips= current_chips, 
+                             turns_this_round = turns_this_round,
+                             round = round, 
+                             bets_equal = bets_equal, 
+                             terminal = terminal, 
+                             num_raises = num_raises)
+    state_legals = jnp.array([0, 1, 1, 1])
+    def process_turn(turn_info, action):
+      current_chips = turn_info.current_chips
+      turns_this_round = turn_info.turns_this_round
+      round = turn_info.round
+      num_raises = turn_info.num_raises
+      players = jnp.arange(2)
+      action_oh = jax.nn.one_hot(action - 1, self.num_actions -1)
+      bets_equal = current_chips[0] == current_chips[1]
+      max_chips = jnp.max(current_chips)
+      current_player = turns_this_round % 2
+      action_chips = jnp.array([current_chips[current_player], max_chips, max_chips + self.raise_amount * (round + 1)])
+      player_chips = jnp.sum(action_oh * action_chips)
+      current_chips = jnp.where(players == current_player, current_chips, player_chips).astype(dtype=int)
+      num_raises = jnp.where(action == RAISE_ID, num_raises + 1, 0)
+      is_chance = jnp.logical_or(jnp.logical_and(turns_this_round > 0, action == CALL_ID), num_raises == 2)
+      turns_this_round = jnp.where(is_chance, -1, turns_this_round)
+      round = jnp.where(is_chance, round + 1, round)
+      turns_this_round += 1
+      #jax.debug.breakpoint()
+      #breakpoint()
+      terminal = jnp.where(jnp.logical_or(round == 2, action == FOLD_ID), True, False)
+      new_turn_info = TurnInfo(current_chips= current_chips, 
+                             turns_this_round = turns_this_round,
+                             round = round, 
+                             bets_equal = bets_equal, 
+                             terminal = terminal, 
+                             num_raises = num_raises)
+      return new_turn_info
+    def skip_turn(turn_info, action):
+      return turn_info
+    for i in range(action_history.shape[0]):
+      action = jnp.sum(action_history[i] * actions)
+      cur_turn_info = jax.lax.cond(action == 0, skip_turn, process_turn, cur_turn_info, action + 1)
+      
+    state_legals  = jnp.where(bets_equal, state_legals - fold_oh, state_legals)
+    state_legals = jnp.where(num_raises == self.max_raises_per_round, state_legals - raise_oh, state_legals)
+    current_player = cur_turn_info.turns_this_round % 2
+    players = jnp.stack([0, 1])[..., None]
+    legals = jnp.where(players == current_player, state_legals[None, ...], invalid_legals[None, ...])
+    game_state = LeducGameState(action_history=jnp.array(action_history),
+                            public_card = jnp.array([public_card]),
+                            private_cards=jnp.array([p1_priv_card, p2_priv_card]),
+                            current_chips = jnp.array(cur_turn_info.current_chips),
+                            turns_this_round = jnp.array([cur_turn_info.turns_this_round]),
+                            terminal= jnp.array(cur_turn_info.terminal))
+    return game_state, legals
+
+
   
   @functools.partial(jax.jit, static_argnums=(0))
   def apply_action(self, game_state : LeducGameState , key, turn, actions):
