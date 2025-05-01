@@ -507,6 +507,8 @@ def get_game_folder(game: JaxGame, folder_type:str):
     init_folder = "muzero_plots"
   elif folder_type == "nash":
     init_folder = "muzero_nash"
+  elif folder_type == "similarities":
+    init_folder = "muzero_similarities"
   if isinstance(game, JaxGoofspiel):
     return init_folder + "/goofspiel_" + str(game.cards) + "_" + game.points_order
   elif isinstance(game, JaxModifiedGoofspiel):
@@ -534,6 +536,18 @@ def compute_or_load_nash(game: JaxGame):
   with open(nash_path, "wb") as f:
     pickle.dump(dict_nash, f)
   return dict_nash
+
+def compute_or_load_similarities(game: JaxGame, sim_type: str):
+  sim_path = get_game_folder(game, "similarities") + "/" + sim_type + ".pkl"
+  if os.path.exists(sim_path):
+    with open(sim_path, "rb") as f:
+      return pickle.load(f)
+  dict_nash = compute_or_load_nash(game)
+  state_iset_map, state_sim_map = get_all_public_states_with_isets_and_similarites(game, sim_type, dict_nash)
+  with open(sim_path, "wb") as f:
+    pickle.dump((state_iset_map, state_sim_map), f)
+  return state_iset_map, state_sim_map
+
 
 def save_k_means_policies():   
   
