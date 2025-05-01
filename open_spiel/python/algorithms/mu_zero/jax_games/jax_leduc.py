@@ -239,7 +239,8 @@ class JaxLeduc(JaxGame):
       player_chips = jnp.sum(action_oh * action_chips)
       current_chips = jnp.where(players == current_player, current_chips, player_chips).astype(dtype=int)
       num_raises = jnp.where(action == RAISE_ID, num_raises + 1, 0)
-      is_chance = jnp.logical_or(jnp.logical_and(turns_this_round > 0, action == CALL_ID), num_raises == 2)
+      is_chance = jnp.logical_and(turns_this_round > 0, action == CALL_ID)
+      #is_chance = jnp.logical_or(jnp.logical_and(turns_this_round > 0, action == CALL_ID), num_raises == 2)
       turns_this_round = jnp.where(is_chance, -1, turns_this_round)
       round = jnp.where(is_chance, round + 1, round)
       turns_this_round += 1
