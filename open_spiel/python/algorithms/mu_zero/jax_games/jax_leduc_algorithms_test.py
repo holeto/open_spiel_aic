@@ -30,21 +30,13 @@ def compare_cfr_constants(full_game_cfr: JaxLeducCFR, spiel_game_cfr: JaxCFR):
     #assert chance_probability_difference == 0
   for pl in range(2):
     for i in range(depth):
-      #breakpoint()
       spiel_cfr_depth = i + 2
       player_utility_difference = jnp.sum(jnp.abs((full_game_cfr.constants.depth_history_utility[i] * (1 - (2 * pl)) * 13) - spiel_game_cfr.constants.depth_history_utility[pl][spiel_cfr_depth]))
       assert player_utility_difference <= 1e-3
       iset_difference = jnp.sum(full_game_cfr.constants.depth_history_iset[pl][i] - spiel_game_cfr.constants.depth_history_iset[pl][spiel_cfr_depth])
       assert iset_difference == 0
       prev_iset_difference = jnp.sum(full_game_cfr.constants.depth_history_previous_iset[pl][i] - spiel_game_cfr.constants.depth_history_previous_iset[pl][spiel_cfr_depth])
-      #breakpoint()
       assert prev_iset_difference == 0
-      #action_mask_difference = jnp.sum(full_game_cfr.constants.depth_history_action_mask[pl][i] - spiel_game_cfr.constants.depth_history_action_mask[pl][spiel_cfr_depth][:-2])
-      #breakpoint()
-      #assert action_mask_difference == 0
-      #prev_action_difference = jnp.sum(full_game_cfr.constants.depth_history_previous_action[pl][i] - spiel_game_cfr.constants.depth_history_previous_action[pl][spiel_cfr_depth])
-      #breakpoint()
-      #assert prev_action_difference == 0
 
 
 
