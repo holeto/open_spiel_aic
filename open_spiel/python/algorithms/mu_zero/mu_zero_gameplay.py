@@ -311,7 +311,7 @@ class MuZeroGameplay:
   def run_cfr(self):
     self.cfr.multiple_steps(self.config.resolve_iterations)
 
-  def get_policy(self, iset):
+  def get_policy_from_cfr(self, iset):
     depth_limit = self.config.depth_limit + self.constructed_gadget
     if self.cfr is None or self.tree_depth >= depth_limit:
       return None
@@ -321,14 +321,13 @@ class MuZeroGameplay:
     
     return policy
   
-  def get_action(self, public_state, iset):
-    
+  def get_policy(self, public_state, iset):
+     
     abstracted_iset = self.muzero.get_abstraction(public_state, iset, self.config.player)
     self.tree_depth += 1
-    optional_policy = self.get_policy(abstracted_iset)
+    optional_policy = self.get_policy_from_cfr(abstracted_iset)
     if optional_policy is not None:
-      
-      return np.random.choice(self.actions, p=optional_policy)
+      return optional_policy
     
     construct_gadget = not self.new_game
     if self.new_game:
@@ -347,10 +346,12 @@ class MuZeroGameplay:
     self.prepare_cfr_structure(isets, reaches, cf_values, construct_gadget)  
     self.run_cfr()
     
-    policy = self.get_policy(abstracted_iset)
+    policy = self.get_policy_from_cfr(abstracted_iset)
     print("Policy: ", policy)
     
+    return policy
+  
+  def get_action(self, public_state, iset):
+    policy = self.get_policy(public_state, iset)
     return np.random.choice(self.actions, p=policy)
-  
-  
   
