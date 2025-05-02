@@ -544,6 +544,7 @@ def compute_or_load_similarities(game: JaxGame, sim_type: str):
       return pickle.load(f)
   dict_nash = compute_or_load_nash(game)
   state_iset_map, state_sim_map = get_all_public_states_with_isets_and_similarites(game, sim_type, dict_nash)
+  os.makedirs(os.path.dirname(sim_path), exist_ok=True)
   with open(sim_path, "wb") as f:
     pickle.dump((state_iset_map, state_sim_map), f)
   return state_iset_map, state_sim_map
