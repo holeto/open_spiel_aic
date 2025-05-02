@@ -46,17 +46,16 @@ def get_abstracted_game_sizes(cards: int):
   
   for k in ks:
     for sim_id, similarity in enumerate(similarity_metric):
-      if "policy" not in similarity:
-        print(f"We are skipping {similarity} similarity metric")
-        continue
+      # if "policy" not in similarity:
+      #   print(f"We are skipping {similarity} similarity metric")
+      #   continue
       for seed in range(amount_seeds):
         final_seed = seed + k * 10 + sim_id * 1000
         model_path = f"{folder}/seed_{final_seed}/muzero_{iters}.pkl"
         model = load_model(model_path)
         history_size, iset_size = get_abstracted_game_size(model)
-        print(f"Seed: {final_seed}|History size: {history_size}|Iset size: {iset_size}")
+        print(f"Seed: {final_seed}|History size: {history_size}|Iset size: {iset_size}", flush=True)
         
 
 if __name__ == "__main__":
-  model = load_model("muzero_networks/goofspiel_5_descending/seed_90305/muzero_200.pkl")
-  print(get_abstracted_game_size(model))
+  get_abstracted_game_sizes(4)
