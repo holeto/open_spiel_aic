@@ -347,7 +347,7 @@ class MuZeroGameplay:
     self.run_cfr()
     
     policy = self.get_policy_from_cfr(abstracted_iset)
-    print("Policy: ", policy)
+    # print("Policy: ", policy)
     
     return policy
   

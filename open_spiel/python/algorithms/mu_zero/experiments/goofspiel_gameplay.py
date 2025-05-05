@@ -165,8 +165,13 @@ def run_heads_against_rnad(args):
       turn += 1
       terminal = np.array(terminal) 
       reward += np.array(game_rewards)
-      
-    print(reward)
+    if reward >= 0.5:
+      print("W", flush=True)
+    elif reward <= -0.5:
+      print("L", flush=True) 
+    else:
+      print("D", flush=True)
+    # print(reward)
     rewards.append(reward)
     
     
