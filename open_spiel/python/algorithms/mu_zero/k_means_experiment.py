@@ -593,6 +593,13 @@ def mean_confidence_interval(data, confidence=0.95):
   lower, upper = st.t.interval(confidence, data.shape[-1] - 1, loc=mean, scale=sem)
   return mean, np.where(np.isnan(lower), mean, lower), np.where(np.isnan(upper), mean, upper)
 
+def print_exploitability_from_seeds(cards: int, sim_type: str, k: int, amount_seeds: int):
+  game = JaxGoofspiel(cards, "descending") 
+  for i in range(amount_seeds):
+    path = get_game_folder(game, "strategy") + "/kmeans_policy/orig_policy" + sim_type + "_" + str(k) + "_" + str(i) + ".pkl"
+    p1_exp, p2_exp = evaluate_saved_policy(game, path)
+    print(f"Seed: {i}|{p1_exp}|{p2_exp}")
+  
 
 def plot_kmeans_exploitability_from_saved(game: JaxGame, sim_type: str, max_k:int, amount_seeds:int): 
   p1_exps, p2_exps = np.zeros((max_k, amount_seeds)), np.zeros((max_k, amount_seeds))
