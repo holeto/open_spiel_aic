@@ -28,18 +28,49 @@ def convert_depth_to_jax(arr):
 def validate_terminal(terminal, threshold: float = 0.5):
   return terminal < threshold
 
+def consolidate_isets(reaches, next_isets_id):
+  new_reaches, new_iset_ids = [[], []], [[], []]
+  joint_id_map = {}
+  max_p1_id = np.max(next_isets_id[0])
+  assert reaches.shape[-1] == next_isets_id.shape[-1]
+  for i in range(next_isets_id.shape[-1]):
+    joint_id =  next_isets_id[0][i] + next_isets_id[1][i] * max_p1_id
+    if joint_id in joint_id_map:
+      new_reaches[0][joint_id_map[joint_id]] += reaches[0][i]
+      new_reaches[1][joint_id_map[joint_id]] += reaches[1][i]
+    else:
+      joint_id_map[joint_id] = len(new_reaches[0])
+      new_reaches[0].append(reaches[0][i])
+      new_reaches[1].append(reaches[1][i])
+      new_iset_ids[0].append(next_isets_id[0][i])
+      new_iset_ids[1].append(next_isets_id[1][i])
+  
+  new_reaches = np.array(new_reaches)
+  new_iset_ids = np.array(new_iset_ids)
+  
+  normalization = np.sum(new_reaches, axis=-1, keepdims=True)
+  
+  new_reaches = new_reaches / (normalization + (normalization == 0))
+  
+  return new_reaches, new_iset_ids
+
 def find_next_root(cfr: MuZeroCFR, tree_depth: int, player: int, public_state, iset):
   opponent = 1 - player
   public_state_histories = cfr.find_public_state_from_iset(iset, player, tree_depth)
   history_reaches = cfr.find_reaches_from_average()[tree_depth][:, public_state_histories]
   # history_reaches = np.asarray(cfr.last_depth_reaches)[:, public_state_histories]
   # TODO: Use numpy or jax.numpy?
-  next_reaches = np.where(np.array([[player == 0], [player == 1]]), history_reaches, 1.0)
+  # next_reaches = np.where(np.array([[player == 0], [player == 1]]), history_reaches, 1.0)
+  
+  
   depth_isets = np.array(cfr.constants.depth_history_iset[tree_depth])
   depth_cf_vals = np.array(cfr.cf_values[tree_depth][opponent])
   next_isets_id = depth_isets[:, public_state_histories]
+  next_reaches, next_isets_id = consolidate_isets(history_reaches, next_isets_id)
+  # Should we put opponent reaches as 1 before or after the consolidation?
+  next_reaches = np.where(np.array([[player == 0], [player == 1]]), next_reaches, 1.0)
   next_cf_values = depth_cf_vals[next_isets_id[opponent]]
-  next_isets = cfr.depth_iset_map[tree_depth][opponent][next_isets_id[opponent]]
+  # next_isets = cfr.depth_iset_map[tree_depth][opponent][next_isets_id[opponent]]
   next_isets = np.stack([np.array(cfr.depth_iset_map[tree_depth][pl])[next_isets_id[pl]] for pl in range(2)], axis = 0)
   return next_isets, next_reaches, next_cf_values 
 
@@ -346,9 +377,7 @@ class MuZeroGameplay:
     self.prepare_cfr_structure(isets, reaches, cf_values, construct_gadget)  
     self.run_cfr()
     
-    policy = self.get_policy_from_cfr(abstracted_iset)
-    # print("Policy: ", policy)
-    
+    policy = self.get_policy_from_cfr(abstracted_iset) 
     return policy
   
   def get_action(self, public_state, iset):
