@@ -598,7 +598,7 @@ def print_exploitability_from_seeds(cards: int, sim_type: str, k: int, amount_se
   for i in range(amount_seeds):
     path = get_game_folder(game, "strategy") + "/kmeans_policy/orig_policy_" + sim_type + "_" + str(k) + "_" + str(i) + ".pkl"
     p1_exp, p2_exp = evaluate_saved_policy(game, path)
-    print(f"Seed: {i}|{p1_exp}|{p2_exp}")
+    print(f"Seed: {i}|{p1_exp}|{p2_exp}", flush=True)
   
 
 def plot_kmeans_exploitability_from_saved(game: JaxGame, sim_type: str, max_k:int, amount_seeds:int): 
