@@ -134,10 +134,10 @@ def compute_separation_loss(pred: chex.Array, cluster_closeness: float = 1.0):
   
   separation_loss = jnp.maximum(0, cluster_closeness- cluster_each_other_distance)
    
-  return jnp.mean(separation_loss)
+  return separation_loss
 
 def pullback_loss(pred: chex.Array):
-  return jnp.mean(jnp.sum(pred ** 2, axis=-1))
+  return jnp.sum(pred ** 2, axis=-1)
  
  
 def compute_soft_kmeans_transformations(real:chex.Array, pred: chex.Array, valid: chex.Array, temperature: float, cluster_closeness_assignment: float, repulsive_force: float):
@@ -185,6 +185,16 @@ def _compute_soft_kmeans_loss_with_cluster_assignments(real:chex.Array, pred: ch
   # cluster_energy_repulsion = compute_energy_repulsion(pred) * 0.001
   cluster_separation_loss = compute_separation_loss(pred, cluster_closeness_assignment) * 0.2
   cluster_pullback_loss = pullback_loss(pred) * 0.0001
+  
+  cluster_separation_loss = cluster_separation_loss * valid[..., None, None]
+  cluster_pullback_loss = cluster_pullback_loss * valid[..., None]
+  
+  normalization = jnp.sum(valid)
+  cluster_separation_loss = cluster_separation_loss / (cluster_separation_loss.shape[-2] * cluster_separation_loss.shape[-1] * normalization + (normalization == 0))
+  cluster_pullback_loss = cluster_pullback_loss / (cluster_pullback_loss.shape[-1] * normalization + (normalization == 0))
+  
+  cluster_separation_loss = jnp.sum(cluster_separation_loss)
+  cluster_pullback_loss = jnp.sum(cluster_pullback_loss)
   
   cluster_loss = jnp.mean(cluster_difference ** 2, axis=-1)
   cluster_loss = jnp.sum(cluster_loss * cluster_soft_assignement, axis=-1) * valid 
