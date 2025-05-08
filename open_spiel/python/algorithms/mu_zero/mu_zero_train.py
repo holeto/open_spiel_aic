@@ -749,8 +749,8 @@ class MuZeroTrain():
       action, action_oh = vectorized_sample_action(sample_key, pi)
       
       next_game_state, terminal, next_rewards, next_legal = self.game.apply_action(carry.game_state, action_key, turn, action)
-      
       valid = jnp.ones_like(next_rewards) - carry.terminal
+      terminal = jnp.clip(carry.terminal + terminal, 0, 1)
       #TODO: This can likely be done better, couldnt get tree_where to work
       #timestep_legal = jnp.where(valid[..., None, None], carry.legal_actions, self.example_timestep.legal)
       next_rewards = jnp.where(valid, next_rewards, 0)
