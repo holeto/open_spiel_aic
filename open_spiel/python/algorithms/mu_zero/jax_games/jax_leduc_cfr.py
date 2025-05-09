@@ -47,6 +47,7 @@ class JaxLeducCFR:
 
   def __init__(
       self,
+      start_state_info = None,
       regret_matching_plus=True,
       alternating_updates=True,
       linear_averaging=True,
@@ -58,9 +59,9 @@ class JaxLeducCFR:
     self.timestep = 1
     self.dummy_key = jax.random.PRNGKey(0)
 
-    self.init()
+    self.init(start_state_info)
 
-  def init(self):
+  def init(self, start_state_info):
     """Constructor."""
 
     # This implementation will only work for 2 player games !!!
@@ -258,9 +259,9 @@ class JaxLeducCFR:
             # 4 chance outcomes in inner chance node
             chance_legals = [[1, 1, 1, 1], [1, 0, 0, 0]]
             _traverse_tree(new_state, new_info, chance_legals, next_reward, depth + 1, True, chance)
-
-    roots, legals = self.game.generate_all_private_card_nodes()
-    for root_state in roots:
+    #Just for checking subgames
+    if start_state_info is not None:
+      root_state, legals, turn = start_state_info
       _traverse_tree(
           root_state,
           PreviousInfo(
@@ -268,13 +269,30 @@ class JaxLeducCFR:
               tuple(0 for _ in range(players)),
               tuple(0 for _ in range(players)),
               0,
-              0,
+              turn,
           ),
           legals,
           0.0,
           0,
-          chance= 1/30
+          chance= 1
       )
+    else:
+      roots, legals = self.game.generate_all_private_card_nodes()
+      for root_state in roots:
+        _traverse_tree(
+            root_state,
+            PreviousInfo(
+                tuple(0 for _ in range(players)),
+                tuple(0 for _ in range(players)),
+                tuple(0 for _ in range(players)),
+                0,
+                0,
+            ),
+            legals,
+            0.0,
+            0,
+            chance= 1/30
+        )
 
     def convert_to_jax(x):
       return [jnp.asarray(i) for i in x]

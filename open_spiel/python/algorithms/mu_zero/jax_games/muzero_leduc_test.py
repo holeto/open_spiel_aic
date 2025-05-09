@@ -17,7 +17,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--solver_save_folder", type=str, default="muzero_networks/goofspiel_3/", help="Path where to save the trained networks.")
 parser.add_argument("--iterations", type=int, default=10000, help="MuZero network training iterations")
 parser.add_argument("--resolve_iterations", type=int, default=3000, help="CFR resolving iterations")
-parser.add_argument("--saved_model_path", type=str, default="muzero_networks/goofspiel_3_descending/seed_50/muzero_9.pkl", help="Path to the already trained model")
+parser.add_argument("--saved_model_path", type=str, default="muzero_networks_no_abstraction/leduc/seed_134/muzero_9.pkl", help="Path to the already trained model")
 
 #Resolve setting
 parser.add_argument("--player", type=int, default=0, choices=(0, 1), help="Resolving player.")
@@ -63,7 +63,7 @@ def run_game(runs, player, muzero_gameplay, game, game_seed, steps = 100):
       actions[player] = pl_action
       actions[opp] = opp_action
       actions = jnp.stack(actions, axis=0)
-      #print("State: ", game_state)
+      print("State: ", game_state)
       print("Action: ", actions)
       key, action_key = jax.random.split(key)
       game_state, terminal, rewards, legals = game.apply_action(game_state, action_key, turn, actions)

@@ -26,6 +26,43 @@ def tree_where(pred: chex.Array, x: chex.ArrayTree, y: chex.ArrayTree) -> chex.A
   
   return jax.tree.map(_where, x, y)
 
+
+def get_real_pure_mvs(after_chance_state: LeducGameState, player:int):
+  """Returns a 12x12 matrix of true MVS values 
+  in a given state at the root of the post-chance subgame.
+  The MVS will always be returned with values for player one
+  (just multiply by -1 for player 2) and has player
+  1 as the row player and player 2 as the column player."""
+  no_raise_win = after_chance_state.current_chips[1 - player] / 13
+  one_raise_win = (after_chance_state.current_chips[1 - player] + 4) / 13
+  no_raise_loss = - after_chance_state.current_chips[player] / 13
+  one_raise_loss = - (after_chance_state.current_chips[player] + 4) / 13
+  private_card_bins = jnp.floor_divide(after_chance_state.private_cards, 2)
+  public_card_matched = private_card_bins == jnp.floor_divide(after_chance_state.public_card - 1, 2) 
+  player_won = jnp.logical_or(public_card_matched[player], (jnp.logical_and(~public_card_matched[1 - player], private_card_bins[player] > private_card_bins[1 - player])))
+  tie = jnp.logical_and(~player_won, private_card_bins[player] == private_card_bins[1 - player])
+  k1 = jnp.where(player_won, no_raise_win, no_raise_loss)
+  k1 = jnp.where(tie, 0, k1)
+  k2 = jnp.where(player_won, one_raise_win, one_raise_loss)
+  k2 = jnp.where(tie, 0, k2)
+  k3 = jnp.where(player_won, (after_chance_state.current_chips[1 - player] + 8) / 13,  - (after_chance_state.current_chips[player] + 8) / 13)
+  k3 = jnp.where(tie, 0, k3)
+  mvs = [[k1] * 6 + [k2] * 6,
+         [k1] * 6 + [k2] * 6,
+         [k1] * 6 + [k3, one_raise_win] * 3 ,
+         [k1] * 6 + [no_raise_loss] * 6,
+         [k1] * 6 + [no_raise_loss] * 6,
+         [k1] * 6 + [k3, one_raise_win] * 3 ,
+         ([k2] * 2 + [no_raise_win] * 2 + [k3] * 2) * 2,
+         ([k2] * 2 + [no_raise_win] * 2 + [one_raise_loss] * 2) * 2,
+         ([k2] * 2 + [no_raise_win] * 2 + [one_raise_loss] * 2) * 2,
+         ([k2] * 2 + [no_raise_win] * 2 + [one_raise_loss] * 2) * 2,
+         ([k2] * 2 + [no_raise_win] * 2 + [k3] * 2) * 2,
+         ([k2] * 2 + [no_raise_win] * 2 + [k3] * 2) * 2,]
+  mvs = jnp.array(mvs)
+  #jax.debug.breakpoint()
+  return mvs
+
 def expand_chance(game: JaxLeduc, after_chance_node_state: LeducGameState):
   chance_node_states, validity_mask = game.generate_pc_nodes_and_mask(after_chance_node_state)
   chance_node_states = jax.tree_map(lambda *x: jnp.stack(x), *chance_node_states)
@@ -56,9 +93,10 @@ def validate_chance(prev_game_state_pc, game_state_pc):
 def find_next_root(cfr: MuZeroLeducCFR, tree_depth: int, player: int, public_state, iset, isets_to_states):
   opponent = 1 - player
   public_state_histories = cfr.find_public_state_from_iset(iset, player, tree_depth)
-  history_reaches = cfr.find_reaches_from_average()[tree_depth]
-  history_reaches = history_reaches[:, public_state_histories]
-  next_reaches = np.where(np.array([[player == 0], [player == 1]]), history_reaches, 1.0) #* 0.25
+  history_reaches, history_chance_reaches = cfr.find_reaches_from_average()
+  history_reaches, history_chance_reaches = history_reaches[tree_depth], history_chance_reaches[tree_depth]
+  history_reaches, history_chance_reaches = history_reaches[:, public_state_histories], history_chance_reaches[public_state_histories]
+  next_reaches = np.where(np.array([[player == 0], [player == 1]]), history_reaches * history_chance_reaches[None, ...], 1.0) #* 0.25
   depth_isets = np.array(cfr.constants.depth_history_iset[tree_depth])
   depth_cf_vals = np.array(cfr.cf_values[tree_depth][opponent])
   next_isets_id = depth_isets[:, public_state_histories]
@@ -72,12 +110,13 @@ def find_next_root(cfr: MuZeroLeducCFR, tree_depth: int, player: int, public_sta
 # Starts in a single public state and creates a DL-tree.
 # Each layer should be done at once. Any call to NN should be done once!
 # For now this creates the tree in the original game and not an abstraction tree
-def prepare_cfr_structure(muzero: MuZeroTrain, player: int, turn:int, depth_limit, states, legals, reaches, cf_values, construct_gadget):
+def prepare_cfr_structure(muzero: MuZeroTrain, player: int, turns, depth_limit, states, legals, reaches, cf_values, construct_gadget):
   chex.assert_equal(states.terminal.shape[0], reaches.shape[1])
   chex.assert_equal(states.terminal.shape, cf_values.shape)
   game = muzero.game
   assert isinstance(game, JaxLeduc), """This is a domain specific implementation that works only for JaxLeduc!"""
-  mvs_actions = muzero.config.transformations + 1
+  mvs_actions = 12 
+  #mvs_actions = muzero.config.transformations + 1
   
   depth_iset_map = [] # We create initial dummy iset 0
   depth_iset_legal = []
@@ -95,7 +134,14 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, turn:int, depth_limi
   #Key is not mapped, since we build a full tree
   # and do not care which chance nodes outcomes get sampled
   dummy_key = jax.random.key(0)
-  vectorized_next_state = jax.vmap(game.apply_action, in_axes=(0, None, None, 1), out_axes=(0, 0, 0, 1))
+  #Just a wrapper method to be able
+  #to vmap over turn without throwing errors
+  def next_turn_wrapper(state, key, turn, joint_action):
+    turn = turn[0]
+    return game.apply_action(state, key, turn, joint_action)
+
+  vectorized_next_state = jax.vmap(next_turn_wrapper, in_axes=(0, None, 0, 1), out_axes=(0, 0, 0, 1))
+  vectorized_get_mvs = jax.vmap(get_real_pure_mvs, in_axes=(0, None), out_axes=(0))
   
   not_acting_legals = np.array([1, 0, 0, 0])
   chance_legals = np.array([[1, 0, 0, 0], [1, 1, 1, 1]])
@@ -133,7 +179,8 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, turn:int, depth_limi
     state_tensors, p1_isets, p2_isets, public_states = vectorized_get_info(curr_states)
     curr_iset = np.stack((p1_isets, p2_isets))
     iset_map, _, isets, actions = create_iset_map(curr_iset, mvs_actions)
-    mvs_vals = muzero.get_mvs(public_states, p1_isets, p2_isets)
+    #mvs_vals = muzero.get_mvs(public_states, p1_isets, p2_isets)
+    mvs_vals = vectorized_get_mvs(curr_states, player)
     iset_legal = [np.ones(iset_map[pl].shape[:-1] + (mvs_actions,)) for pl in range(2)]  
     legal = np.ones_like(mvs_vals)
     next_history = np.full_like(mvs_vals, -1, dtype=int)
@@ -147,12 +194,13 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, turn:int, depth_limi
     depth_history_next_history.append(next_history)
     
   
-  def handle_single_layer(curr_states, curr_legal, valid, is_chance, depth):
+  def handle_single_layer(curr_turns, curr_states, curr_legal, valid, is_chance, depth):
     state_tensors, p1_isets, p2_isets, public_states = vectorized_get_info(curr_states)
+    invalid_iset = np.zeros_like(p1_isets[0])
     curr_iset = np.stack((p1_isets, p2_isets))
-    #For chance nodes switch to chance legals
-    curr_legal = np.where(is_chance[None, :, None], chance_legals[:, None, ...], curr_legal)
+    curr_iset = np.where(is_chance[None, :, None], invalid_iset[None, None, ...], curr_iset)
     iset_map, iset_legal, isets, actions = create_iset_map(curr_iset, muzero.actions, curr_legal = curr_legal)
+    #breakpoint()
     p1_legal_iset, p2_legal_iset = iset_legal[0], iset_legal[1]
     p1_legal_iset, p2_legal_iset = p1_legal_iset > 0, p2_legal_iset > 0
     
@@ -171,9 +219,9 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, turn:int, depth_limi
     joint_actions = np.stack((p1_actions, p2_actions))
     prev_states = jax.tree_map(lambda x: jnp.repeat(x, muzero.actions ** 2, axis=0), curr_states)
     valid = np.repeat(valid, muzero.actions ** 2, axis=0)
+    curr_turns = np.repeat(curr_turns, muzero.actions ** 2, axis=0)
 
-    next_states, next_terminal, next_utilities, next_legals = vectorized_next_state(prev_states, dummy_key, turn + depth - int(construct_gadget), joint_actions)
-
+    next_states, next_terminal, next_utilities, next_legals = vectorized_next_state(prev_states, dummy_key, curr_turns, joint_actions)
 
     # We will select only utilities of player 0. We can do some more fancy stuff here, but whatever.
     #Hopefully this should keep that player zero is the row player
@@ -202,6 +250,8 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, turn:int, depth_limi
     next_valid = ~is_chance * valid
     next_utilities = np.where(next_valid, next_utilities, 0)
     next_terminal = np.where(next_valid, next_terminal, False)
+
+    next_turns = curr_turns + 1
     
     next_utilities = next_utilities.reshape(legal.shape)
     next_terminal = next_terminal.reshape(legal.shape)
@@ -215,6 +265,9 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, turn:int, depth_limi
     # outcomes are propagated to MVS layer and given
     # value there
     next_states = tree_where(valid, next_states, prev_states)
+    #For chance nodes switch to chance legals
+    next_legals = np.where(next_chance[None, :, None], chance_legals[:, None, ...], next_legals)
+    #otherwise get only the single legal action there
     next_legals = np.where(next_valid[None, ..., None], next_legals, not_acting_legals[None, None, ...])
     non_terminal = validate_terminal(next_terminal) * legal
     
@@ -226,6 +279,7 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, turn:int, depth_limi
     next_valid = next_valid[*nonzeros]
     next_legals = next_legals[:, *nonzeros, :]
     next_chance = next_chance[*nonzeros]
+    next_turns = next_turns[*nonzeros]
     
     # This should be -1 everywhere, except the part where you have next history. Therey ou go by terminal and just add 1
     next_history = (np.cumsum(non_terminal).reshape(non_terminal.shape) * non_terminal) - 1
@@ -238,14 +292,15 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, turn:int, depth_limi
     depth_history_actions.append(actions)
     depth_history_legal.append(legal)  
     depth_history_next_history.append(next_history.astype(int))
-
+    
+    #breakpoint()
     if np.all(next_history < 0):
       return
     
     if depth + 1 == depth_limit:
       handle_mvs_layer(next_states)
     else:
-      handle_single_layer(next_states, next_legals, next_valid, next_chance, depth+1)
+      handle_single_layer(next_turns, next_states, next_legals, next_valid, next_chance, depth+1)
     
     
   def handle_gadget_layer(curr_states, curr_legal, cf_values):
@@ -281,12 +336,12 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, turn:int, depth_limi
     depth_history_legal.append(legals)
     depth_history_next_history.append(next_history)
     
-    handle_single_layer(curr_states, curr_legal, np.ones(curr_states.terminal.shape[0]), np.zeros(curr_states.terminal.shape[0]), 0)   
+    handle_single_layer(turns, curr_states, curr_legal, np.ones(curr_states.terminal.shape[0]), np.zeros(curr_states.terminal.shape[0]), 0)   
 
   if construct_gadget:
     handle_gadget_layer(states, legals, cf_values)
   else:
-    handle_single_layer(states, legals, np.ones(states.terminal.shape[0]), np.zeros(states.terminal.shape[0]), 0)
+    handle_single_layer(turns, states, legals, np.ones(states.terminal.shape[0]), np.zeros(states.terminal.shape[0]), 0)
   init_reaches = jnp.copy(reaches)
   init_condition = jnp.array([player == 0, player == 1])
   init_reaches = jnp.where(init_condition[..., None], init_reaches, 1) 
@@ -364,13 +419,13 @@ class MuZeroLeducGameplay:
   
   # Starts in a single public state and creates a DL-tree.
   # Each layer should be done at once. Any call to NN should be done once!
-  def prepare_cfr_structure(self, states, legals, reaches, cf_values, construct_gadget):
-    self.cfr = prepare_cfr_structure(self.muzero, self.config.player, self.cfr_start_turn, self.config.depth_limit, states, legals, reaches, cf_values, construct_gadget)
+  def prepare_cfr_structure(self, turns, states, legals, reaches, cf_values, construct_gadget):
+    self.cfr = prepare_cfr_structure(self.muzero, self.config.player, turns, self.config.depth_limit, states, legals, reaches, cf_values, construct_gadget)
 
   def run_cfr(self):
     self.cfr.multiple_steps(self.config.resolve_iterations)
 
-  def get_policy(self, iset):
+  def get_policy_from_cfr(self, iset):
     #a bit of a hack how to get public card from the
     #iset
     public_card = np.nonzero(iset[self.muzero.game.total_cards + 2:2 * self.muzero.game.total_cards + 3])[0][0]
@@ -386,18 +441,17 @@ class MuZeroLeducGameplay:
     policy = self.cfr.get_strategy(iset, self.config.player, self.tree_depth)
     policy = np.asarray(policy, dtype="float64")
     policy /= np.sum(policy)
-    #print("Iset: ", iset)
     print("Policy: ", policy)
     
     return policy
   
-  def get_action(self, public_state, iset):
+  def get_policy(self, public_state, iset):
     
     self.tree_depth += 1
-    optional_policy = self.get_policy(iset)
+    optional_policy = self.get_policy_from_cfr(iset)
     if optional_policy is not None:
       
-      return np.random.choice(self.actions, p=optional_policy)
+      return optional_policy
     
     construct_gadget = not self.new_game
     if self.new_game:
@@ -419,11 +473,17 @@ class MuZeroLeducGameplay:
       self.constructed_gadget = True
       self.tree_depth = 1
 
-    self.prepare_cfr_structure(states, legals, reaches, cf_values, construct_gadget)  
+    turns = np.full((states.terminal.shape[0], 1), self.cfr_start_turn, dtype=int)
+    #jax.debug.breakpoint()
+    self.prepare_cfr_structure(turns, states, legals, reaches, cf_values, construct_gadget)  
     self.run_cfr()
     
-    policy = self.get_policy(iset)
+    policy = self.get_policy_from_cfr(iset)
     
+    return policy
+
+  def get_action(self, public_state, iset):
+    policy = self.get_policy(public_state, iset)
     return np.random.choice(self.actions, p=policy)
   
   

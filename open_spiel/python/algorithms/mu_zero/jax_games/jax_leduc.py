@@ -68,7 +68,7 @@ class JaxLeduc(JaxGame):
     return self.total_cards + 1 + (self.max_turns - 1) * (self.num_actions - 1)
   
   def generate_all_private_card_nodes(self) :
-    """ Get a jnp.array of all game states corresponding
+    """ Get an array of all game states corresponding
     to all the outcomes of the first chance node
     and their legal actions (all the root states have the
     same legal actions.)

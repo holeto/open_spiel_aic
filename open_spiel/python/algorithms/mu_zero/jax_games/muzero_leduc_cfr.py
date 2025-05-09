@@ -61,7 +61,6 @@ class MuZeroLeducCFR:
     self.regrets = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0], a)) for pl in range(self.players)] for d, a in enumerate(constants.depth_actions)]
     self.averages = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0], a)) for pl in range(self.players)] for d, a in enumerate(constants.depth_actions)]
     self.cf_values = [[jnp.zeros((self.constants.depth_iset_legal[d][pl].shape[0]),) for pl in range(self.players)] for d, _ in enumerate(constants.depth_actions)]
-    self.last_depth_reaches = [[jnp.ones(self.constants.depth_history_iset[d][pl].shape[0],) for pl in range(self.players)] for d, _ in enumerate(constants.depth_actions)]
     self.regret_matching = jax.vmap(regret_matching, in_axes=(0, 0), out_axes=0)
     
   def check_constants(self, constants: MuZeroLeducCFRConstants):
@@ -193,12 +192,12 @@ class MuZeroLeducCFR:
     averaging_coefficient = self.timestep if self._linear_averaging else 1
     if self._alternating_updates:
       for player in range(self.players):
-        self.regrets, self.averages, self.cf_values, self.last_depth_reaches = self.jit_step(
+        self.regrets, self.averages, self.cf_values = self.jit_step(
             self.regrets, self.averages, self.cf_values, averaging_coefficient, player, self.timestep
         )
 
     else:
-      self.regrets, self.averages, self.cf_values, self.last_depth_reaches = self.jit_step(
+      self.regrets, self.averages, self.cf_values = self.jit_step(
           self.regrets,
           self.averages,
           self.cf_values,
@@ -268,37 +267,51 @@ class MuZeroLeducCFR:
   def find_reaches(self, strategies):
     
     history_reaches = [self.constants.init_reaches]
+    #We start with those as 1 since we assume
+    # chance to be already included in the init_reaches
+    # for resolving player
+    history_chance_reaches = [jnp.ones_like(self.constants.init_reaches[0])]
     
     history_strategies = []
+    history_chance_strategies = []
     # We allow different legal actions in different histories, even if they are in the same infoset.
     for d in range(self.max_depth):
       p1_legals = jnp.sum(self.constants.depth_history_legal[d], -1) > 0
       p2_legals = jnp.sum(self.constants.depth_history_legal[d], -2) > 0
 
-      p1_strategy = strategies[d][0][self.constants.depth_history_iset[d][0]]
-      p2_strategy = strategies[d][1][self.constants.depth_history_iset[d][1]]
+      p1_strategy = jnp.where(self.constants.depth_history_is_chance[d][..., None], 1, strategies[d][0][self.constants.depth_history_iset[d][0]])
+      p2_strategy = jnp.where(self.constants.depth_history_is_chance[d][..., None], 1, strategies[d][1][self.constants.depth_history_iset[d][1]])
+      #Taking advantage of the fact that there is only ever one chance node
+      # in the inner game
+      chance_strategy = jnp.where(self.constants.depth_history_is_chance[d][..., None], 1/4, jnp.ones_like(p1_strategy))
       
       legals = jnp.stack([p1_legals, p2_legals], axis=0)
       legalized_strategies = jnp.stack([p1_strategy, p2_strategy], axis=0)
       legalized_strategies = legalized_strategies * legals
       legalized_strategies = jnp.where(jnp.sum(legalized_strategies, axis=-1, keepdims=True) > 1e-8, legalized_strategies / jnp.sum(legalized_strategies, axis=-1, keepdims=True), legals / jnp.sum(legals, axis=-1, keepdims=True))
       history_strategies.append(legalized_strategies)
+      history_chance_strategies.append(chance_strategy)
     
     
     for d in range(self.max_depth - 1):
       strategy_realization = history_reaches[d][..., None] * history_strategies[d]
+      chance_realization = history_chance_reaches[d][..., None] * history_chance_strategies[d]
 
       
       p1_masked_realization = strategy_realization[0, ..., None] * (self.constants.depth_history_next_history[d] >= 0)
       
       p2_masked_realization = strategy_realization[1, :, None, ...] * (self.constants.depth_history_next_history[d] >= 0)
+      #The chance actions are for the column player 
+      chance_masked_realization = chance_realization[:, None, ...] * (self.constants.depth_history_next_history[d] >= 0)
       
       
       p1_reaches_next = jnp.bincount(self.constants.depth_history_next_history[d].ravel(), p1_masked_realization.ravel(), length=self.constants.depth_history_next_history[d+1].shape[0])
       p2_reaches_next = jnp.bincount(self.constants.depth_history_next_history[d].ravel(), p2_masked_realization.ravel(), length=self.constants.depth_history_next_history[d+1].shape[0])
-      
+      chance_reaches_next = jnp.bincount(self.constants.depth_history_next_history[d].ravel(), chance_masked_realization.ravel(), length=self.constants.depth_history_next_history[d+1].shape[0])
+
       history_reaches.append(jnp.stack([p1_reaches_next, p2_reaches_next], axis=0))
-    return history_reaches
+      history_chance_reaches.append(chance_reaches_next)
+    return history_reaches, history_chance_reaches
     
 
   @functools.partial(jax.jit, static_argnums=(0, 5))
@@ -306,36 +319,46 @@ class MuZeroLeducCFR:
     current_strategies = [[self.regret_matching(regrets[d][pl], self.constants.depth_iset_legal[d][pl]) for pl in range(self.players)] for d in range(self.max_depth)]
   
     history_reaches = [self.constants.init_reaches]
+    #We start with those as 1 since we assume
+    # chance to be already included in the init_reaches
+    # for resolving player
+    history_chance_reaches = [jnp.ones_like(self.constants.init_reaches[0])]
     # history_strategies = [jnp.stack([current_strategies[d][pl][self.constants.depth_history_iset[d][pl]] for pl in range(self.players)], axis=0) for d in range(self.max_depth)]
     
     history_strategies = []
+    history_chance_strategies = []
     # We allow different legal actions in different histories, even if they are in the same infoset.
     for d in range(self.max_depth):
       p1_legals = jnp.sum(self.constants.depth_history_legal[d], -1) > 0
       p2_legals = jnp.sum(self.constants.depth_history_legal[d], -2) > 0
-
-      p1_strategy = current_strategies[d][0][self.constants.depth_history_iset[d][0]]
-      p2_strategy = current_strategies[d][1][self.constants.depth_history_iset[d][1]]
+   
+      #Handling propagating chance node reaches correctly
+      p1_strategy = jnp.where(self.constants.depth_history_is_chance[d][..., None], 1, current_strategies[d][0][self.constants.depth_history_iset[d][0]])
+      p2_strategy = jnp.where(self.constants.depth_history_is_chance[d][..., None], 1, current_strategies[d][1][self.constants.depth_history_iset[d][1]])
+      chance_strategy = jnp.where(self.constants.depth_history_is_chance[d][..., None], 1/4, jnp.ones_like(p1_strategy))
       
       legals = jnp.stack([p1_legals, p2_legals], axis=0)
       strategies = jnp.stack([p1_strategy, p2_strategy], axis=0)
       strategies = strategies * legals
-      strategies = jnp.where(jnp.sum(strategies, axis=-1, keepdims=True) > 1e-8, strategies / jnp.sum(strategies, axis=-1, keepdims=True), legals / jnp.sum(legals, axis=-1, keepdims=True))
+      #Do not normalize the strategy if this is a chance node
+      strategies = jnp.where(self.constants.depth_history_is_chance[d][None, ..., None], strategies, jnp.where(jnp.sum(strategies, axis=-1, keepdims=True) > 1e-8, strategies / jnp.sum(strategies, axis=-1, keepdims=True), legals / jnp.sum(legals, axis=-1, keepdims=True)))
       history_strategies.append(strategies)
+      history_chance_strategies.append(chance_strategy)
     
     for d in range(self.max_depth):
       strategy_realization = history_reaches[d][..., None] * history_strategies[d]
+      chance_realization = history_chance_reaches[d][..., None] * history_chance_strategies[d]
       
       strategy_realization_non_masked = history_reaches[d][..., None] * jnp.stack([current_strategies[d][pl][self.constants.depth_history_iset[d][pl]] for pl in range(self.players)], axis=0)
       
       
       # TODO: This is dumb 
       if player != 1:
-        p1_iset_realizations = jnp.bincount(self.constants.depth_history_actions[d][0].ravel(), strategy_realization_non_masked[0].ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][0].shape[0]).reshape(averages[d][0].shape)
+        p1_iset_realizations = jnp.bincount(self.constants.depth_history_actions[d][0].ravel(), strategy_realization_non_masked[0].ravel() * chance_realization.ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][0].shape[0]).reshape(averages[d][0].shape)
         averages[d][0] = averages[d][0] + p1_iset_realizations * average_policy_update_coefficient
         
       if player != 0:
-        p2_iset_realizations = jnp.bincount(self.constants.depth_history_actions[d][1].ravel(), strategy_realization_non_masked[1].ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][1].shape[0]).reshape(averages[d][1].shape) 
+        p2_iset_realizations = jnp.bincount(self.constants.depth_history_actions[d][1].ravel(), strategy_realization_non_masked[1].ravel() * chance_realization.ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][1].shape[0]).reshape(averages[d][1].shape) 
         averages[d][1] = averages[d][1] + p2_iset_realizations * average_policy_update_coefficient
       
       # We do not compute the next history, since there is none
@@ -346,11 +369,18 @@ class MuZeroLeducCFR:
       
       p2_masked_realization = strategy_realization[1, :, None, ...] * (self.constants.depth_history_next_history[d] >= 0)
       
+      #The chance actions are for the column player 
+      chance_masked_realization = chance_realization[:, None, ...] * (self.constants.depth_history_next_history[d] >= 0)
+
+      #jax.debug.breakpoint()
       
       p1_reaches_next = jnp.bincount(self.constants.depth_history_next_history[d].ravel(), p1_masked_realization.ravel(), length=self.constants.depth_history_next_history[d+1].shape[0])
       p2_reaches_next = jnp.bincount(self.constants.depth_history_next_history[d].ravel(), p2_masked_realization.ravel(), length=self.constants.depth_history_next_history[d+1].shape[0])
-      
+      chance_reaches_next = jnp.bincount(self.constants.depth_history_next_history[d].ravel(), chance_masked_realization.ravel(), length=self.constants.depth_history_next_history[d+1].shape[0])
+      #print("At reaches depth: ", d)
+      #jax.debug.breakpoint()
       history_reaches.append(jnp.stack([p1_reaches_next, p2_reaches_next], axis=0))
+      history_chance_reaches.append(chance_reaches_next)
       
     # How to work with depth_utils in the first round (and subsequent)
     depth_utils = [jnp.zeros((1,))]
@@ -358,15 +388,16 @@ class MuZeroLeducCFR:
     for d in range(self.max_depth - 1, -1, -1):
       action_value = jnp.where(self.constants.depth_history_next_history[d] >= 0, depth_utils[-1][self.constants.depth_history_next_history[d]], self.constants.depth_history_action_utility[d])
       # action_value = self.constants.depth_history_action_utility[d] + depth_utils[-1][self.constants.depth_history_next_history[d]] * (self.constants.depth_history_next_history[d] >= 0)
-      action_probabilities = history_strategies[d][0,..., None] * history_strategies[d][1, :, None, ...]
+      action_probabilities = history_strategies[d][0,..., None] * history_strategies[d][1, :, None, ...] * history_chance_strategies[d][:, None]
+      #jax.debug.breakpoint()
       history_value = jnp.sum(action_value * action_probabilities, axis=(-1, -2))
       depth_utils.append(history_value)
       
       
       # TODO: This is dumb
       if player != 1:
-        p1_value = jnp.sum(action_value * history_strategies[d][1, :, None, ...], axis=-1)
-        p1_cf_regret = (p1_value - history_value[..., None]) * jnp.expand_dims(history_reaches[d][1], -1)
+        p1_value = jnp.sum(action_value * history_strategies[d][1, :, None, ...] * history_chance_strategies[d][:, None, ...], axis=-1)
+        p1_cf_regret = (p1_value - history_value[..., None]) * jnp.expand_dims(history_reaches[d][1], -1) * jnp.expand_dims(history_chance_reaches[d], -1)
         
         p1_legals = jnp.sum(self.constants.depth_history_legal[d], -1) > 0
         p1_cf_regret = p1_cf_regret * p1_legals
@@ -374,19 +405,22 @@ class MuZeroLeducCFR:
         
         p1_bin_regrets = jnp.bincount(self.constants.depth_history_actions[d][0].ravel(), p1_cf_regret.ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][0].shape[0]).reshape(regrets[d][0].shape) * self.constants.depth_iset_legal[d][0]
         
-        cf_value = history_value[..., None] * jnp.expand_dims(history_reaches[d][1], -1) 
+        cf_value = history_value[..., None] * jnp.expand_dims(history_reaches[d][1], -1) * jnp.expand_dims(history_chance_reaches[d], -1)
+        cf_value = jnp.where(self.constants.depth_history_is_chance[d][..., None], 0, cf_value)
         bin_cf_value = jnp.bincount(self.constants.depth_history_iset[d][0].ravel(), cf_value.ravel(), length=self.constants.depth_iset_legal[d][0].shape[0]).reshape(cf_values[d][0].shape)
         
-        bin_reaches = jnp.bincount(self.constants.depth_history_iset[d][0].ravel(), history_reaches[d][1].ravel(), length=self.constants.depth_iset_legal[d][0].shape[0]).reshape(cf_values[d][0].shape)
+        bin_reaches = jnp.bincount(self.constants.depth_history_iset[d][0].ravel(), history_reaches[d][1].ravel() * history_chance_reaches[d].ravel(), length=self.constants.depth_iset_legal[d][0].shape[0]).reshape(cf_values[d][0].shape)
         
         bin_cf_value = jnp.where(bin_reaches > 1e-8, bin_cf_value / bin_reaches, bin_cf_value) 
         cf_values[d][0] = cf_values[d][0] + (bin_cf_value - cf_values[d][0]) * (2 / (iteration + 1))
         
         regrets[d][0] = jnp.maximum(regrets[d][0] + p1_bin_regrets, 0.0)
+        #print("Updating regrets at depth ", d, " for player ", player)
+        #jax.debug.breakpoint()
         
       if player != 0:
-        p2_value = jnp.sum(action_value * history_strategies[d][0,..., None], axis=-2)
-        p2_cf_regret = (p2_value - history_value[..., None]) * jnp.expand_dims(history_reaches[d][0], -1)
+        p2_value = jnp.sum(action_value * history_strategies[d][0,..., None] * history_chance_strategies[d][:, None, ...], axis=-2)
+        p2_cf_regret = (p2_value - history_value[..., None]) * jnp.expand_dims(history_reaches[d][0], -1) * jnp.expand_dims(history_chance_reaches[d], -1)
         
         p2_legals = jnp.sum(self.constants.depth_history_legal[d], -2) > 0
         p2_cf_regret = p2_cf_regret * p2_legals
@@ -394,17 +428,20 @@ class MuZeroLeducCFR:
         
         p2_bin_regrets = jnp.bincount(self.constants.depth_history_actions[d][1].ravel(), p2_cf_regret.ravel(), length=self.constants.depth_actions[d] * self.constants.depth_iset_legal[d][1].shape[0]).reshape(regrets[d][1].shape) * self.constants.depth_iset_legal[d][1]
         
-        cf_value = history_value[..., None] * jnp.expand_dims(history_reaches[d][0], -1) 
+        cf_value = history_value[..., None] * jnp.expand_dims(history_reaches[d][0], -1) * jnp.expand_dims(history_chance_reaches[d], -1)
+        cf_value = jnp.where(self.constants.depth_history_is_chance[d][..., None], 0, cf_value) 
         
         bin_cf_value = jnp.bincount(self.constants.depth_history_iset[d][1].ravel(), cf_value.ravel(), length=self.constants.depth_iset_legal[d][1].shape[0]).reshape(cf_values[d][1].shape)
         
-        bin_reaches = jnp.bincount(self.constants.depth_history_iset[d][1].ravel(), history_reaches[d][0].ravel(), length=self.constants.depth_iset_legal[d][1].shape[0]).reshape(cf_values[d][1].shape)
+        bin_reaches = jnp.bincount(self.constants.depth_history_iset[d][1].ravel(), history_reaches[d][0].ravel() * history_chance_reaches[d].ravel(), length=self.constants.depth_iset_legal[d][1].shape[0]).reshape(cf_values[d][1].shape)
         
         bin_cf_value = jnp.where(bin_reaches > 1e-8, bin_cf_value / bin_reaches, bin_cf_value)        
         cf_values[d][1] = cf_values[d][1] + (bin_cf_value - cf_values[d][1]) * (2 / (iteration + 1))
         
         regrets[d][1] = jnp.maximum(regrets[d][1] - p2_bin_regrets, 0.0)
+        #print("Updating regrets at depth ", d, " for player ", player)
+        #jax.debug.breakpoint()
       
       
       # history_value = jnp.sum(action_value *)
-    return regrets, averages, cf_values, history_reaches[-1]
+    return regrets, averages, cf_values
