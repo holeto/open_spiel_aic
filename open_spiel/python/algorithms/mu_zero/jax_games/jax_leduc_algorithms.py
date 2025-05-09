@@ -28,8 +28,10 @@ def extract_policy_from_muzero(muzero: MuZeroTrain, resolve_iterations=3000, ini
   from MuZeroLeducGameplay."""
   game = JaxLeduc()
   p1_config = MuZeroGameplayConfig(depth_limit = 5, resolve_iterations=resolve_iterations, player=0)
+  p2_config = MuZeroGameplayConfig(depth_limit = 5, resolve_iterations=resolve_iterations, player=1)
 
   p1_gameplay = MuZeroLeducGameplay(muzero, p1_config)
+  p2_gameplay = MuZeroLeducGameplay(muzero, p2_config)
 
   after_chance_legals = np.array([[0, 0, 1, 1], [1, 0, 0, 0]])
 
@@ -43,7 +45,8 @@ def extract_policy_from_muzero(muzero: MuZeroTrain, resolve_iterations=3000, ini
     state_tensor, p1_iset, p2_iset, ps = game.get_info(state)
     #p1_gameplay.tree_depth = depth
     pl_iset = p1_iset if cur_player == 0 else p2_iset
-    policy[stringify(pl_iset)] = p1_gameplay.cfr.get_strategy(pl_iset, cur_player, depth)
+    pl_gameplay = p1_gameplay if cur_player == 0 else p2_gameplay
+    policy[stringify(pl_iset)] = pl_gameplay.cfr.get_strategy(pl_iset, cur_player, depth)
     for a1i, a1 in enumerate(legals[0]):
       for a2i, a2 in enumerate(legals[1]):
         if a1 < 0.5 or a2 < 0.5:
@@ -73,7 +76,10 @@ def extract_policy_from_muzero(muzero: MuZeroTrain, resolve_iterations=3000, ini
   start_cf_values = np.zeros(start_root.terminal.shape[0])
 
   p1_gameplay.prepare_cfr_structure(start_turns, start_root, init_legals, start_reaches, start_cf_values, False)
+  p2_gameplay.prepare_cfr_structure(start_turns, start_root, init_legals, start_reaches, start_cf_values, False)
+  
   p1_gameplay.run_cfr()
+  p2_gameplay.run_cfr()
   if init_state_info is not None:
     init_chance_outcomes, init_legals, init_turns = init_state_info
   else:
@@ -93,13 +99,16 @@ def extract_policy_from_muzero(muzero: MuZeroTrain, resolve_iterations=3000, ini
     return last_depth_reaches, last_depth_cf_values
 
   p1_next_reaches, p1_next_cf_vals = get_next_root(p1_gameplay.cfr, 0)
+  p2_next_reaches, p2_next_cf_vals = get_next_root(p2_gameplay.cfr, 1)
   next_root_stacked = jax.tree_map(lambda *x: jnp.stack(x), *next_root_states)
   next_legals_repeated = np.tile(after_chance_legals[:, None, :], (1, next_root_stacked.terminal.shape[0], 1))
 
   after_chance_turns = np.array(next_root_turn, dtype=int)[:, None]
   p1_gameplay.prepare_cfr_structure(after_chance_turns, next_root_stacked, next_legals_repeated, p1_next_reaches, p1_next_cf_vals, True)
+  p2_gameplay.prepare_cfr_structure(after_chance_turns, next_root_stacked, next_legals_repeated, p1_next_reaches, p1_next_cf_vals, True)
 
   p1_gameplay.run_cfr()
+  p2_gameplay.run_cfr()
 
   for state, turn in zip(next_root_states, next_root_turn):
     _traverse_tree(state, after_chance_legals, cur_player=0, turn = turn, depth=1)
