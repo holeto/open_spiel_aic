@@ -27,25 +27,25 @@ def tree_where(pred: chex.Array, x: chex.ArrayTree, y: chex.ArrayTree) -> chex.A
   return jax.tree.map(_where, x, y)
 
 
-def get_real_pure_mvs(after_chance_state: LeducGameState, player:int):
+def get_real_pure_mvs(after_chance_state: LeducGameState):
   """Returns a 12x12 matrix of true MVS values 
   in a given state at the root of the post-chance subgame.
   The MVS will always be returned with values for player one
   (just multiply by -1 for player 2) and has player
   1 as the row player and player 2 as the column player."""
-  no_raise_win = after_chance_state.current_chips[1 - player] / 13
-  one_raise_win = (after_chance_state.current_chips[1 - player] + 4) / 13
-  no_raise_loss = - after_chance_state.current_chips[player] / 13
-  one_raise_loss = - (after_chance_state.current_chips[player] + 4) / 13
+  no_raise_win = after_chance_state.current_chips[1] / 13
+  one_raise_win = (after_chance_state.current_chips[1] + 4) / 13
+  no_raise_loss = - after_chance_state.current_chips[0] / 13
+  one_raise_loss = - (after_chance_state.current_chips[0] + 4) / 13
   private_card_bins = jnp.floor_divide(after_chance_state.private_cards, 2)
   public_card_matched = private_card_bins == jnp.floor_divide(after_chance_state.public_card - 1, 2) 
-  player_won = jnp.logical_or(public_card_matched[player], (jnp.logical_and(~public_card_matched[1 - player], private_card_bins[player] > private_card_bins[1 - player])))
-  tie = jnp.logical_and(~player_won, private_card_bins[player] == private_card_bins[1 - player])
+  player_won = jnp.logical_or(public_card_matched[0], (jnp.logical_and(~public_card_matched[1], private_card_bins[0] > private_card_bins[1])))
+  tie = jnp.logical_and(~player_won, private_card_bins[0] == private_card_bins[1])
   k1 = jnp.where(player_won, no_raise_win, no_raise_loss)
   k1 = jnp.where(tie, 0, k1)
   k2 = jnp.where(player_won, one_raise_win, one_raise_loss)
   k2 = jnp.where(tie, 0, k2)
-  k3 = jnp.where(player_won, (after_chance_state.current_chips[1 - player] + 8) / 13,  - (after_chance_state.current_chips[player] + 8) / 13)
+  k3 = jnp.where(player_won, (after_chance_state.current_chips[1] + 8) / 13,  - (after_chance_state.current_chips[0] + 8) / 13)
   k3 = jnp.where(tie, 0, k3)
   mvs = [[k1] * 6 + [k2] * 6,
          [k1] * 6 + [k2] * 6,
@@ -141,7 +141,7 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, turns, depth_limit, 
     return game.apply_action(state, key, turn, joint_action)
 
   vectorized_next_state = jax.vmap(next_turn_wrapper, in_axes=(0, None, 0, 1), out_axes=(0, 0, 0, 1))
-  vectorized_get_mvs = jax.vmap(get_real_pure_mvs, in_axes=(0, None), out_axes=(0))
+  vectorized_get_mvs = jax.vmap(get_real_pure_mvs, in_axes=(0), out_axes=(0))
   
   not_acting_legals = np.array([1, 0, 0, 0])
   chance_legals = np.array([[1, 0, 0, 0], [1, 1, 1, 1]])
@@ -180,7 +180,7 @@ def prepare_cfr_structure(muzero: MuZeroTrain, player: int, turns, depth_limit, 
     curr_iset = np.stack((p1_isets, p2_isets))
     iset_map, _, isets, actions = create_iset_map(curr_iset, mvs_actions)
     #mvs_vals = muzero.get_mvs(public_states, p1_isets, p2_isets)
-    mvs_vals = vectorized_get_mvs(curr_states, player)
+    mvs_vals = vectorized_get_mvs(curr_states)
     iset_legal = [np.ones(iset_map[pl].shape[:-1] + (mvs_actions,)) for pl in range(2)]  
     legal = np.ones_like(mvs_vals)
     next_history = np.full_like(mvs_vals, -1, dtype=int)
