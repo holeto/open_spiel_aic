@@ -4,6 +4,7 @@ from open_spiel.python.algorithms.mu_zero.jax_games.jax_leduc import JaxLeduc, L
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_leduc_cfr import JaxLeducCFR
 from open_spiel.python.algorithms.mu_zero.experiments.utils import stringify
 from open_spiel.python.policy import TabularPolicy
+from open_spiel.python.algorithms.best_response import BestResponsePolicy
 from open_spiel.python.algorithms.mu_zero.jax_games.muzero_leduc_gameplay import MuZeroLeducGameplay, MuZeroGameplayConfig, MuZeroLeducCFR
 from open_spiel.python.algorithms.mu_zero.mu_zero_train import MuZeroTrain
 #from open_spiel.python.algorithms.mu_zero.mu_zero_gameplay import convert_depth_to_jax, convert_player_depth_to_jax
@@ -290,3 +291,14 @@ def check_subgame(muzero: MuZeroTrain, resolve_iterations= 3000, epsilon = 1e-5)
     
 
 
+
+
+def leduc_exploitability(jax_policy: JaxPolicy):
+  tab_policy = jax_policy_to_tabular(jax_policy)
+  game = pyspiel.load_game("leduc_poker")
+  br1 = BestResponsePolicy(game, 1, tab_policy)
+  br2 = BestResponsePolicy(game, 0, tab_policy)
+  p1_val = br1.value(game.new_initial_state())
+  p2_val = br2.value(game.new_initial_state())
+  return p1_val, p2_val
+    
