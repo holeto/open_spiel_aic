@@ -17,7 +17,7 @@ parser = argparse.ArgumentParser()
 # parser.add_argument("--leduc_depth", type=int, default=4)
 parser.add_argument("--iterations", type=int, default=1000)
 
-parser.add_argument("--experiment_name", type=str, default="rnad", choices=["no_abstraction", "no_dynamics", "with_dynamics", "rnad"])
+parser.add_argument("--experiment_type", type=str, default="rnad", choices=["no_abstraction", "no_dynamics", "with_dynamics", "rnad"])
  
 parser.add_argument("--seed", type=int, default=1068, help="Random seed")
 parser.add_argument("--model_range", type=int, nargs="+", default=[6, 7, 1], help="Model range") 
