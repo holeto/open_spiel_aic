@@ -44,7 +44,7 @@ def create_iset_map(curr_iset, amount_actions, offset):
   iset_map = [np.array(i) for i in iset_map]
   return iset_map, isets, actions
   
-def prepare_init_leduc_cfr(model, experiment_name: str):
+def prepare_init_leduc_cfr(model, experiment_type: str):
   game = JaxLeduc()
   init_states, init_legal_actions = game.generate_all_private_card_nodes()
   vectorized_get_info = jax.vmap(game.get_info, in_axes=(0,))
@@ -96,14 +96,14 @@ def prepare_init_leduc_cfr(model, experiment_name: str):
   def _traverse_leduc(game_state, abs_isets, legal_actions, key, depth = 0):
     public_card = np.array(game_state.public_card)
     
-    if experiment_name == "no_abstraction":
+    if experiment_type == "no_abstraction":
       _, real_p1_isets, real_p2_isets, real_public_states = vectorized_get_info(game_state)
       curr_isets = np.stack([real_p1_isets, real_p2_isets], axis=0)
-    elif experiment_name == "no_dynamics":
+    elif experiment_type == "no_dynamics":
       _, real_p1_isets, real_p2_isets, real_public_states = vectorized_get_info(game_state)
       abs_p1_isets, abs_p2_isets = model.get_both_abstraction(real_public_states, real_p1_isets, real_p2_isets)
       curr_isets = np.stack([abs_p1_isets, abs_p2_isets], axis=0)
-    elif experiment_name == "with_dynamics":
+    elif experiment_type == "with_dynamics":
       curr_isets = abs_isets
     if public_card[0] != 0:
       # return
@@ -181,7 +181,7 @@ def prepare_init_leduc_cfr(model, experiment_name: str):
     iset_map, isets, actions = create_iset_map(curr_isets, leduc_actions, offset)
     
     legality_threshold = 0.0
-    if experiment_name == "no_abstraction":
+    if experiment_type == "no_abstraction":
       p1_legal_iset = np.repeat(legal_actions[0][None, ...], iset_map[0].shape[0], axis=0)
       p2_legal_iset = np.repeat(legal_actions[1][None, ...], iset_map[1].shape[0], axis=0)
     else:
@@ -222,7 +222,7 @@ def prepare_init_leduc_cfr(model, experiment_name: str):
         
         next_p1_isets, next_p2_isets, next_utilities, next_abs_terminal = vectorized_abstraction(abs_isets[0], abs_isets[1], a1i, a2i)
         
-        if experiment_name == "no_abstraction" or experiment_name == "no_dynamics":
+        if experiment_type == "no_abstraction" or experiment_type == "no_dynamics":
           action_utility[..., a1i, a2i] = np.array(next_rewards)
         else:
           action_utility[..., a1i, a2i] = np.array(next_utilities[:, 0] - next_utilities[:, 1]) / 2
@@ -291,7 +291,7 @@ def prepare_init_leduc_cfr(model, experiment_name: str):
   
   after_chance_abstraction = np.stack([after_chance_p1_abstraction, after_chance_p2_abstraction], axis=0)
   
-  if experiment_name == "no_abstraction":
+  if experiment_type == "no_abstraction":
     mvs_actions = 12
     mvs_vmap = jax.vmap(get_real_pure_mvs, in_axes=(0,), out_axes=0)
     mvs_history_action_utility = mvs_vmap(new_mvs_states)
@@ -340,7 +340,7 @@ def prepare_init_leduc_cfr(model, experiment_name: str):
   return cfr, new_mvs_states, mvs_depths
 
  
-def prepare_cont_leduc_cfr(model, cfr: MuZeroLeducInit, after_chance_states: LeducGameState, after_chance_depths: jnp.ndarray, experiment_name: str):
+def prepare_cont_leduc_cfr(model, cfr: MuZeroLeducInit, after_chance_states: LeducGameState, after_chance_depths: jnp.ndarray, experiment_type: str):
   
   game = JaxLeduc()
   vectorized_get_info = jax.vmap(game.get_info, in_axes=(0,))
@@ -367,14 +367,14 @@ def prepare_cont_leduc_cfr(model, cfr: MuZeroLeducInit, after_chance_states: Led
   def _traverse_leduc(game_state, abs_isets, legal_actions, key, tree_depth: jnp.ndarray, structure_depth=0):
     # if depth == 4:
     #   assert False, "This should not happen"
-    if experiment_name == "no_abstraction":
+    if experiment_type == "no_abstraction":
       _, real_p1_isets, real_p2_isets, real_public_states = vectorized_get_info(game_state)
       curr_isets = np.stack([real_p1_isets, real_p2_isets], axis=0)
-    elif experiment_name == "no_dynamics":
+    elif experiment_type == "no_dynamics":
       _, real_p1_isets, real_p2_isets, real_public_states = vectorized_get_info(game_state)
       abs_p1_isets, abs_p2_isets = model.get_both_abstraction(real_public_states, real_p1_isets, real_p2_isets)
       curr_isets = np.stack([abs_p1_isets, abs_p2_isets], axis=0)
-    elif experiment_name == "with_dynamics":
+    elif experiment_type == "with_dynamics":
       curr_isets = abs_isets
     
     if len(depth_iset_map) <= structure_depth:
@@ -396,7 +396,7 @@ def prepare_cont_leduc_cfr(model, cfr: MuZeroLeducInit, after_chance_states: Led
     
     legality_threshold = 0.0
     
-    if experiment_name == "no_abstraction":
+    if experiment_type == "no_abstraction":
       p1_legal_iset = np.repeat(legal_actions[0][None, ...], iset_map[0].shape[0], axis=0)
       p2_legal_iset = np.repeat(legal_actions[1][None, ...], iset_map[1].shape[0], axis=0)
     else:
@@ -441,7 +441,7 @@ def prepare_cont_leduc_cfr(model, cfr: MuZeroLeducInit, after_chance_states: Led
         
         next_p1_isets, next_p2_isets, next_utilities, next_abs_terminal = vectorized_abstraction(abs_isets[0], abs_isets[1], a1i, a2i)
         
-        if experiment_name == "no_abstraction" or experiment_name == "no_dynamics":
+        if experiment_type == "no_abstraction" or experiment_type == "no_dynamics":
           action_utility[..., a1i, a2i] = np.array(next_rewards)
         else:
           action_utility[..., a1i, a2i] = np.array(next_utilities[:, 0] - next_utilities[:, 1]) / 2
@@ -482,14 +482,14 @@ def prepare_cont_leduc_cfr(model, cfr: MuZeroLeducInit, after_chance_states: Led
   
   def prepare_gadget_layer(game_state, abs_isets):
     
-    if experiment_name == "no_abstraction":
+    if experiment_type == "no_abstraction":
       _, real_p1_isets, real_p2_isets, real_public_states = vectorized_get_info(game_state)
       curr_isets = np.stack([real_p1_isets, real_p2_isets], axis=0)
-    elif experiment_name == "no_dynamics":
+    elif experiment_type == "no_dynamics":
       _, real_p1_isets, real_p2_isets, real_public_states = vectorized_get_info(game_state)
       abs_p1_isets, abs_p2_isets = model.get_both_abstraction(real_public_states, real_p1_isets, real_p2_isets)
       curr_isets = np.stack([abs_p1_isets, abs_p2_isets], axis=0)
-    elif experiment_name == "with_dynamics":
+    elif experiment_type == "with_dynamics":
       curr_isets = abs_isets
     
     
@@ -636,7 +636,7 @@ def prepare_cont_leduc_cfr(model, cfr: MuZeroLeducInit, after_chance_states: Led
   return p1_cfr, p2_cfr
           
           
-def export_policy_from_cfr(model, init_cfr, p1_cfr, p2_cfr, experiment_name: str):
+def export_policy_from_cfr(model, init_cfr, p1_cfr, p2_cfr, experiment_type: str):
   game = JaxLeduc()
   
   strategy  = {}
@@ -655,12 +655,12 @@ def export_policy_from_cfr(model, init_cfr, p1_cfr, p2_cfr, experiment_name: str
     np_p2_iset = np.array(p2_iset)
     p1_iset_str = stringify(np_p1_iset)
     p2_iset_str = stringify(np_p2_iset)
-    if experiment_name == "no_abstraction":
+    if experiment_type == "no_abstraction":
       curr_p1_iset, curr_p2_iset = p1_iset,p2_iset
-    elif experiment_name == "no_dynamics":
+    elif experiment_type == "no_dynamics":
       abs_p1_iset, abs_p2_iset = model.get_both_abstraction(public_state, p1_iset, p2_iset)
       curr_p1_iset, curr_p2_iset = abs_p1_iset, abs_p2_iset
-    elif experiment_name == "with_dynamics":
+    elif experiment_type == "with_dynamics":
       curr_p1_iset, curr_p2_iset = abs_isets[0], abs_isets[1]
       
     
@@ -857,23 +857,23 @@ def run_leduc_experiment():
     assert isinstance(model.game, JaxLeduc)
   
     
-    if args.experiment_name == "rnad":
+    if args.experiment_type == "rnad":
       strategy = get_rnad_strategy(model)
     else:
       
-      cfr, after_chance_states, after_chance_depths = prepare_init_leduc_cfr(model, args.experiment_name)
+      cfr, after_chance_states, after_chance_depths = prepare_init_leduc_cfr(model, args.experiment_type)
       
       cfr.multiple_steps(args.iterations)
       print("Solved initial CFR")
       print(cfr.averages[0][0] / jnp.sum(cfr.averages[0][0], -1, keepdims=True))
       print(cfr.averages[1][1] / jnp.sum(cfr.averages[1][1], -1, keepdims=True))
       
-      p1_cfr, p2_cfr = prepare_cont_leduc_cfr(model, cfr, after_chance_states, after_chance_depths, args.experiment_name)
+      p1_cfr, p2_cfr = prepare_cont_leduc_cfr(model, cfr, after_chance_states, after_chance_depths, args.experiment_type)
 
       p1_cfr.multiple_steps(args.iterations)
       p2_cfr.multiple_steps(args.iterations)
       print("Solved continuation CFR") 
-      strategy = export_policy_from_cfr(model, cfr, p1_cfr, p2_cfr, args.experiment_name)
+      strategy = export_policy_from_cfr(model, cfr, p1_cfr, p2_cfr, args.experiment_type)
       print("Exporting policy")  
       
     p1_br, p2_br = leduc_exploitability(strategy)
