@@ -3,8 +3,6 @@ import jax.numpy as jnp
 import numpy as np
 import chex
 
-from jax.experimental.host_callback import id_print
-
 import functools
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_game import JaxGame, GameState
 
