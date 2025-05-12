@@ -1505,7 +1505,7 @@ class MuZeroTrain():
     elif self.config.similarity_metric == SimilarityMetric.ISET_VECTOR: 
       similarity = similarity_iset(timestep.obs) 
     elif self.config.similarity_metric == SimilarityMetric.ISET_POLICY:
-      sim_iset = similarity_iset(timestep.obs, 0.25)
+      sim_iset = similarity_iset(timestep.obs, 1.0)
       sim_pi = similarity_policy(pi)
       similarity = jnp.concatenate((sim_iset, sim_pi), axis=-1)
     similarity = similarity + jax.random.normal(rng_key, similarity.shape) * self.config.similarity_noise
