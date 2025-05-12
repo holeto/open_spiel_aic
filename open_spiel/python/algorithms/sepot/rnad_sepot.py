@@ -27,8 +27,7 @@ from jax import tree_util as tree
 import numpy as np
 import optax
 
-from open_spiel.python import policy as policy_lib
-from jax.experimental.host_callback import id_print
+from open_spiel.python import policy as policy_lib 
 import pyspiel
 
 

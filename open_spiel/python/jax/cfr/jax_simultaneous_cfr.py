@@ -35,8 +35,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from open_spiel.python import policy
-from jax.experimental.host_callback import id_print
+from open_spiel.python import policy 
 from open_spiel.python.jax.cfr.jax_cfr import regret_matching, update_regrets, update_regrets_plus
 import pyspiel
 
