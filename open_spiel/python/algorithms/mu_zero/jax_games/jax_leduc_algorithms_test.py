@@ -4,7 +4,7 @@ import os
 import pickle
 import jax.numpy as jnp
 
-from open_spiel.python.algorithms.mu_zero.jax_games.jax_leduc_algorithms import solve_full_game, check_subgame, compare_policies, jax_policy_to_tabular, extract_policy_from_muzero
+from open_spiel.python.algorithms.mu_zero.jax_games.jax_leduc_algorithms import solve_full_game, check_subgame, leduc_exploitability, compare_policies, jax_policy_to_tabular, extract_policy_from_muzero
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_game_algorithms import stringify
 #from open_spiel.python.policy import TabularPolicy
 from open_spiel.python.algorithms.mu_zero.jax_games.jax_leduc import JaxLeduc
@@ -70,13 +70,19 @@ def check_full_game_exploitability(args):
   print("JAX CFR exploitability: ", exploitability(spiel_game, tabular_pols))
   return tabular_pols
 
+
+def get_muzero_pols(args):
+  if not os.path.exists(args.saved_model_path):
+      assert False, "MuZero model at " + str(args.saved_model_path) + " was not found!"
+  with open(args.saved_model_path, "rb") as f:
+    muzero = pickle.load(f)
+  muzero_pols = extract_policy_from_muzero(muzero, args.resolve_iterations)
+  return muzero_pols
+
 def check_muzero_exploitability(args):
     spiel_game = pyspiel.load_game("leduc_poker")
-    if not os.path.exists(args.saved_model_path):
-      assert False, "MuZero model at " + str(args.saved_model_path) + " was not found!"
-    with open(args.saved_model_path, "rb") as f:
-      muzero = pickle.load(f)
-    muzero_pols = extract_policy_from_muzero(muzero, args.resolve_iterations)
+    
+    muzero_pols = get_muzero_pols(args)
     muzero_spiel_pols = jax_policy_to_tabular(muzero_pols)
     p1_br = BestResponsePolicy(spiel_game, 1, muzero_spiel_pols)
     p2_br = BestResponsePolicy(spiel_game, 0, muzero_spiel_pols)
@@ -86,7 +92,7 @@ def check_muzero_exploitability(args):
     print("Real p2_val: ", p2_val)
     print("MuZero P2 Best response val", p2_br.value(spiel_game.new_initial_state()))
     print("MuZero exploitability: ", exploitability(spiel_game, muzero_spiel_pols))
-    return muzero_spiel_pols
+    return muzero_pols
 
 def check_subgame_test(args):
   if not os.path.exists(args.saved_model_path):
@@ -102,7 +108,11 @@ def main():
   #profiler = Profiler()
   #profiler.start()
   #full_game_pols = check_full_game_exploitability(args)
-  muzero_pols = check_muzero_exploitability(args)
+  #muzero_pols = check_muzero_exploitability(args)
+  muzero_pols = get_muzero_pols(args)
+  p1_br_val, p2_br_val = leduc_exploitability(muzero_pols)
+  print("MuZero Best response against P1 policy val: ", p1_br_val)
+  print("MuZero Best response against P2 policy val: ", p2_br_val)
   #compare_policies(full_game_pols, muzero_pols, epsilon = 0.01)
   #profiler.stop()
   #print(profiler.output_text(unicode=True, color=True))

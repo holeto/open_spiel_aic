@@ -106,7 +106,7 @@ def extract_policy_from_muzero(muzero: MuZeroTrain, resolve_iterations=3000, ini
 
   after_chance_turns = np.array(next_root_turn, dtype=int)[:, None]
   p1_gameplay.prepare_cfr_structure(after_chance_turns, next_root_stacked, next_legals_repeated, p1_next_reaches, p1_next_cf_vals, True)
-  p2_gameplay.prepare_cfr_structure(after_chance_turns, next_root_stacked, next_legals_repeated, p1_next_reaches, p1_next_cf_vals, True)
+  p2_gameplay.prepare_cfr_structure(after_chance_turns, next_root_stacked, next_legals_repeated, p2_next_reaches, p2_next_cf_vals, True)
 
   p1_gameplay.run_cfr()
   p2_gameplay.run_cfr()
@@ -244,7 +244,7 @@ def check_subgame(muzero: MuZeroTrain, resolve_iterations= 3000, epsilon = 1e-5)
                       [0, 0, 0]]
     action_history = jnp.array(action_history)
     current_chips = jnp.array([1, 1])
-    private_cards = jnp.array([2, 4])
+    private_cards = jnp.array([0, 4])
     public_card = jnp.array([0])
     turns_this_round = jnp.array([0])
     terminal = jnp.array(False)
