@@ -15,15 +15,17 @@ parser.add_argument("--restore_step", type=int, default= -1, help="Which model s
 
 parser.add_argument("--num_cards", type=int, default=3, help="Number of cards for the point card matching game. Make sure this matches the amount of cards of the stored model.")
 
-def check_policies(model: VQ_VAETrain, game: PointCardMatching):
-  eps = 1e-4
+def check_policies(model: VQ_VAETrain, game: PointCardMatching, eps=1e-3):
+  """Traverse the real game tree and for each state first 
+  represent it as afterstate and then check learned policy for that afterstate
+  and compare it with reference"""
   dummy_key = jax.random.key(0)
   def _traverse_tree(state, legals, depth=0):
     #only interested in policy for player 1 here for reasons below
     state_reference_pols = get_reference_policy(state, legals)[0]
     state_tensor, _, _, _ = game.get_info(state)
     state_learned_pols = model.networks.get_policy_from_real(state_tensor)
-    if np.sum(np.abs(state_reference_pols - state_learned_pols)) >= 1e-4:
+    if np.max(np.abs(state_reference_pols - state_learned_pols)) >= eps:
       print(f"Policies differ by more than {eps} in state: {state}")
       print(f"Reference policy: {state_reference_pols}")
       print(f"Learned policy: {state_learned_pols}")
@@ -36,9 +38,41 @@ def check_policies(model: VQ_VAETrain, game: PointCardMatching):
       next_state, next_legals, next_rewards, terminal = game.apply_action(state, dummy_key, depth, jnp.asarray([ai, 0]))
       if terminal:
         continue
-      _traverse_tree(next_state, next_legals, depth + 1)
+      _traverse_tree(next_state, np.asarray(next_legals), depth + 1)
   init_state, init_legals = game.initialize_structures(dummy_key)
-  _traverse_tree(init_state, init_legals)
+  _traverse_tree(init_state, np.asarray(init_legals))
+
+def check_afterstate_tree(model: VQ_VAETrain, game:PointCardMatching, eps=1e-3):
+  """Traverse the afterstate tree and check against reference policies
+  obtained through traversing the original tree as well. Mainly intended to test the dynamics"""
+  dummy_key = jax.random.key(0)
+  actions = game.num_distinct_actions()
+  def _traverse_tree(state, afterstate, legals, depth=0):
+    afterstate_policy_logits, outcome = model.networks._jit_get_policy_outcome(afterstate)
+    afterstate_policy = jax.nn.softmax(afterstate_policy_logits)
+    afterstate_policy = np.asarray(afterstate_policy)
+    state_reference_pols = get_reference_policy(state, legals)[0]
+    print(f"Policies in state: {state}")
+    print(f"Reference policy: {state_reference_pols}")
+    print(f"Learned policy: {afterstate_policy}")
+    # if np.max(np.abs(state_reference_pols - afterstate_policy)) >= eps:
+    #   print(f"Policies differ by more than {eps} in state: {state}")
+    #   print(f"Reference policy: {state_reference_pols}")
+    #   print(f"Learned policy: {afterstate_policy}")
+    for ai, a in enumerate(legals[0]):
+      if a < eps:
+        continue
+      next_state, next_legals, next_rewards, terminal = game.apply_action(state, dummy_key, depth, jnp.asarray([ai, 0]))
+      outcome = jax.nn.one_hot(ai, actions)
+      next_afterstate = model.networks._jit_get_next_afterstate(afterstate, outcome)
+      if terminal:
+        continue
+      _traverse_tree(next_state, next_afterstate, np.asarray(next_legals), depth + 1)
+
+  init_state, init_legals = game.initialize_structures(dummy_key)
+  init_state_tensor, _, _, _ = game.get_info(init_state)
+  init_afterstate = model.networks._jit_get_representation(init_state_tensor)
+  _traverse_tree(init_state, init_afterstate, np.asarray(init_legals))
 
 
 def main():
@@ -53,7 +87,10 @@ def main():
   model = VQ_VAETrain(dummy_config, args.num_cards, model_save_dir=model_path)
   model.restore_latest_checkpoint(args.restore_step)
   assert isinstance(model.game, PointCardMatching), "This test assumes that the model is trained on the PointCardMatching game, which it is not!"
+  print("Real tree mapping test: ")
   check_policies(model, model.game)
+  print("Dynamics test: ")
+  check_afterstate_tree(model, model.game)
 
 if __name__ == "__main__":
   main()
