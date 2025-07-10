@@ -33,7 +33,7 @@ def check_policies(model: VQ_VAETrain, game: PointCardMatching, eps=1e-3):
     # has only one invalid action, so it can be viewed as a simultaneous move 
     # game for consistency with other JaxGames
     for ai, a in enumerate(state_reference_pols):
-      if a < 0.5:
+      if a < eps:
         continue
       next_state, next_legals, next_rewards, terminal = game.apply_action(state, dummy_key, depth, jnp.asarray([ai, 0]))
       if terminal:
@@ -52,10 +52,6 @@ def check_afterstate_tree(model: VQ_VAETrain, game:PointCardMatching, eps=1e-3):
     afterstate_policy = jax.nn.softmax(afterstate_policy_logits)
     afterstate_policy = np.asarray(afterstate_policy)
     state_reference_pols = np.asarray(get_reference_policy(state, legals)[0])
-    # print(f"Policies in state: {state}")
-    # print(f"Afterstate: ", afterstate)
-    # print(f"Reference policy: {state_reference_pols}")
-    # print(f"Learned policy: {afterstate_policy}")
     if np.max(np.abs(state_reference_pols - afterstate_policy)) >= eps:
       print(f"Policies differ by more than {eps} in state: {state}")
       print(f"Reference policy: {state_reference_pols}")
