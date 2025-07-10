@@ -22,7 +22,7 @@ def check_policies(model: VQ_VAETrain, game: PointCardMatching, eps=1e-3):
   dummy_key = jax.random.key(0)
   def _traverse_tree(state, legals, depth=0):
     #only interested in policy for player 1 here for reasons below
-    state_reference_pols = get_reference_policy(state, legals)[0]
+    state_reference_pols = np.asarray(get_reference_policy(state, legals)[0])
     state_tensor, _, _, _ = game.get_info(state)
     state_learned_pols = model.networks.get_policy_from_real(state_tensor)
     if np.max(np.abs(state_reference_pols - state_learned_pols)) >= eps:
@@ -32,7 +32,7 @@ def check_policies(model: VQ_VAETrain, game: PointCardMatching, eps=1e-3):
     #Only player 1 acts in PointCardMatching, the second player
     # has only one invalid action, so it can be viewed as a simultaneous move 
     # game for consistency with other JaxGames
-    for ai, a in enumerate(legals[0]):
+    for ai, a in enumerate(state_reference_pols):
       if a < 0.5:
         continue
       next_state, next_legals, next_rewards, terminal = game.apply_action(state, dummy_key, depth, jnp.asarray([ai, 0]))
