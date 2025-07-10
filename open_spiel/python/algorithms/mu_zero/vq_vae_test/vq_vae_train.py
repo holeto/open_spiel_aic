@@ -148,7 +148,7 @@ class VQ_VAETrainStep(nnx.Module):
     policy_logits, outcome = self._jit_get_policy_outcome(afterstate)
     return nnx.softmax(policy_logits)
   
-  def loss_function(self, state_targets, action_targets, valid):
+  def loss_function_decode_first_step(self, state_targets, action_targets, valid):
     #Trajectory, Batch, ...] is the shape of the 
     # state and action targets
     #TODO: After checking that this is correct, try to remove the for loops
@@ -161,28 +161,37 @@ class VQ_VAETrainStep(nnx.Module):
       policy_logits, outcomes = self.vectorized_get_policy(afterstates)
       decoded_states = self.vectorized_decoder(afterstates)
       total_loss += jnp.mean(optax.l2_loss(decoded_states, state_targets[i]) * valid[i])
-      #decoder loss only in the first state in the trajectory
       total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[i], -1)) * valid[i])
       #unrolling over the rest of the trajectory now
-      for j in range(i, state_targets.shape[0]):
+      for j in range(i + 1, state_targets.shape[0]):
         #only the policy losses here for now
         afterstates = self.vectorized_get_next_afterstate(afterstates, outcomes)
         policy_logits, outcomes = self.vectorized_get_policy(afterstates)
         total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[j], -1)) * valid[j])
     return total_loss
   
+  def loss_function_decode_all_steps(self, state_targets, action_targets, valid):
+    #TODO: After checking that this is correct, try to remove the for loops
+    total_loss = 0
+    for i in range(state_targets.shape[0]):
+      #encode the first state
+      #[Batch, afterstate_dim]
+      afterstates = self.vectorized_get_representation(state_targets[i])
+      #[Batch, actions]
+      policy_logits, outcomes = self.vectorized_get_policy(afterstates)
+      decoded_states = self.vectorized_decoder(afterstates)
+      total_loss += jnp.mean(optax.l2_loss(decoded_states, state_targets[i]) * valid[i])
+      total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[i], -1)) * valid[i])
+      #unrolling over the rest of the trajectory now
+      for j in range(i + 1, state_targets.shape[0]):
+        afterstates = self.vectorized_get_next_afterstate(afterstates, outcomes)
+        decoded_states = self.vectorized_decoder(afterstates)
+        total_loss += jnp.mean(optax.l2_loss(decoded_states, state_targets[j]) * valid[j])
+        policy_logits, outcomes = self.vectorized_get_policy(afterstates)
+        total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[j], -1)) * valid[j])
+        #jax.debug.breakpoint()
+    return total_loss
   
-  def check_state_shapes(self, x):
-    """Debug method for checking correct shapes of dictionaries
-    with nested arrays, such as the network parameters, or the optimizer state"""
-    def print_shape_or_elem(x):
-      if isinstance(x, jax.Array):
-        s = x.shape
-        print(s)
-      else:
-        print("Found a not jax array")
-        print(x)
-    jax.tree_util.tree_map(lambda x: print_shape_or_elem(x), x)
 
   @nnx.jit   
   #This should be compiled only once!!!
@@ -190,9 +199,9 @@ class VQ_VAETrainStep(nnx.Module):
   def optimize_step(self,state_targets, action_targets, valid):
     """Function performing the actual step, where 
     we call the loss_function, derivate it with respect to self (a.k.a the params
-    stored in self), and then reconstruct new optimizer and model state"""
+    stored in self), and then call self.optimizer update."""
     def loss_fn(current_train_state):
-      return current_train_state.loss_function(state_targets, action_targets, valid)
+      return current_train_state.loss_function_decode_first_step(state_targets, action_targets, valid)
     
     total_loss, all_grads = nnx.value_and_grad(loss_fn)(self)
     self.optimizer.update(all_grads)
@@ -259,6 +268,7 @@ class VQ_VAETrain:
     #params_pre_update = nnx.variables(self.networks, nnx.Param).to_pure_dict()
     #just to ensure shape consistency with the classic batch
     step_loss = self.networks.optimize_step(batch_timestep.state, batch_timestep.action, batch_timestep.valid)
+    #jax.debug.breakpoint()
     #params_post_update = nnx.variables(self.networks, nnx.Param).to_pure_dict()
     #check_param_difference(params_post_update, params_pre_update)
     #jax.debug.breakpoint()

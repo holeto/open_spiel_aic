@@ -51,15 +51,16 @@ def check_afterstate_tree(model: VQ_VAETrain, game:PointCardMatching, eps=1e-3):
     afterstate_policy_logits, outcome = model.networks._jit_get_policy_outcome(afterstate)
     afterstate_policy = jax.nn.softmax(afterstate_policy_logits)
     afterstate_policy = np.asarray(afterstate_policy)
-    state_reference_pols = get_reference_policy(state, legals)[0]
-    print(f"Policies in state: {state}")
-    print(f"Reference policy: {state_reference_pols}")
-    print(f"Learned policy: {afterstate_policy}")
-    # if np.max(np.abs(state_reference_pols - afterstate_policy)) >= eps:
-    #   print(f"Policies differ by more than {eps} in state: {state}")
-    #   print(f"Reference policy: {state_reference_pols}")
-    #   print(f"Learned policy: {afterstate_policy}")
-    for ai, a in enumerate(legals[0]):
+    state_reference_pols = np.asarray(get_reference_policy(state, legals)[0])
+    # print(f"Policies in state: {state}")
+    # print(f"Afterstate: ", afterstate)
+    # print(f"Reference policy: {state_reference_pols}")
+    # print(f"Learned policy: {afterstate_policy}")
+    if np.max(np.abs(state_reference_pols - afterstate_policy)) >= eps:
+      print(f"Policies differ by more than {eps} in state: {state}")
+      print(f"Reference policy: {state_reference_pols}")
+      print(f"Learned policy: {afterstate_policy}")
+    for ai, a in enumerate(state_reference_pols):
       if a < eps:
         continue
       next_state, next_legals, next_rewards, terminal = game.apply_action(state, dummy_key, depth, jnp.asarray([ai, 0]))
@@ -73,6 +74,34 @@ def check_afterstate_tree(model: VQ_VAETrain, game:PointCardMatching, eps=1e-3):
   init_state_tensor, _, _, _ = game.get_info(init_state)
   init_afterstate = model.networks._jit_get_representation(init_state_tensor)
   _traverse_tree(init_state, init_afterstate, np.asarray(init_legals))
+
+def afterstate_walk_test(model:VQ_VAETrain, game:PointCardMatching):
+  """Does not check with reference directly, just perform a 
+   test of getting afterstate outcomes and print out policies and given outcomes."""
+  dummy_key = jax.random.key(0)
+  state, legals = game.initialize_structures(dummy_key)
+  init_state_tensor, _, _, _ = game.get_info(state)
+  afterstate = model.networks._jit_get_representation(init_state_tensor)
+  decoded_afterstate = model.networks._jit_decoder(afterstate)
+  print(f"Init decoded afterstate: {decoded_afterstate}")
+  print(f"Init state tensor: {init_state_tensor}")
+  for i in range(model.config.trajectory_max):
+    policy, outcome = model.networks._jit_get_policy_outcome(afterstate)
+    print(f"Policy: {jax.nn.softmax(policy)}")
+    print(f"Argmax outcome {outcome}")
+    afterstate = model.networks._jit_get_next_afterstate(afterstate, outcome)
+    decoded_afterstate = model.networks._jit_decoder(afterstate)
+    ai = np.argmax(np.cumsum(outcome))
+    state, legals, reward, terminal = game.apply_action(state, dummy_key, i, jnp.asarray([ai, 0]))
+    #The model is not trained on terminal states
+    if terminal:
+      break
+    state_tensor, _, _, _ = game.get_info(state)
+    decoded_afterstate = model.networks._jit_decoder(afterstate)
+    print(f"Next decoded afterstate: {decoded_afterstate}")
+    print(f"Next state tensor {state_tensor}")
+
+
 
 
 def main():
@@ -91,6 +120,8 @@ def main():
   check_policies(model, model.game)
   print("Dynamics test: ")
   check_afterstate_tree(model, model.game)
+  print("Afterstate tree walk test: ")
+  afterstate_walk_test(model, model.game)
 
 if __name__ == "__main__":
   main()

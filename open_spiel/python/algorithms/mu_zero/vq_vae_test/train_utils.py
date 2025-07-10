@@ -90,6 +90,18 @@ def check_param_difference(p_after, p_before):
   diff_tree = jax.tree_util.tree_map(lambda p_after, p_before: p_after - p_before, p_after, p_before)
   norm_tree = jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x), diff_tree)
   print(norm_tree)
+ 
+  def check_state_shapes(x):
+    """Debug method for checking correct shapes of dictionaries
+    with nested arrays, such as the network parameters, or the optimizer state"""
+    def print_shape_or_elem(x):
+      if isinstance(x, jax.Array):
+        s = x.shape
+        print(s)
+      else:
+        print("Found a not jax array")
+        print(x)
+    jax.tree_util.tree_map(lambda x: print_shape_or_elem(x), x)
 
   
 def pickle_dump(filename, data):
