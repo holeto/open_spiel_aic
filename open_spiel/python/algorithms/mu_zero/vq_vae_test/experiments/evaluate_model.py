@@ -25,6 +25,9 @@ def check_policies(model: VQ_VAETrain, game: PointCardMatching, eps=1e-3):
     state_reference_pols = np.asarray(get_reference_policy(state, legals)[0])
     state_tensor, _, _, _ = game.get_info(state)
     state_learned_pols = model.networks.get_policy_from_real(state_tensor)
+    # print(f"Policies in state: {state}")
+    # print(f"Reference policy: {state_reference_pols}")
+    # print(f"Learned policy: {state_learned_pols}")
     if np.max(np.abs(state_reference_pols - state_learned_pols)) >= eps:
       print(f"Policies differ by more than {eps} in state: {state}")
       print(f"Reference policy: {state_reference_pols}")
@@ -52,6 +55,9 @@ def check_afterstate_tree(model: VQ_VAETrain, game:PointCardMatching, eps=1e-3):
     afterstate_policy = jax.nn.softmax(afterstate_policy_logits)
     afterstate_policy = np.asarray(afterstate_policy)
     state_reference_pols = np.asarray(get_reference_policy(state, legals)[0])
+    # print(f"Policies in state: {state}")
+    # print(f"Reference policy: {state_reference_pols}")
+    # print(f"Learned policy: {afterstate_policy}")
     if np.max(np.abs(state_reference_pols - afterstate_policy)) >= eps:
       print(f"Policies differ by more than {eps} in state: {state}")
       print(f"Reference policy: {state_reference_pols}")

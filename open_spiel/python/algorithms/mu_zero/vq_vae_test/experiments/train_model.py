@@ -16,6 +16,9 @@ parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning 
 parser.add_argument("--network_seed", type=int, default=-1, help="Random seed for network initialization")
 parser.add_argument("--trajectory_seed", type=int, default=-1, help="Random seed for trajectory generation")
 
+#
+parser.add_argument("--beta_commitment", type=float, default=0.25, help="The beta parameter in VQ-VAE commitment loss")
+
 # Game parameters
 parser.add_argument("--num_cards", type=int, default=3, help="Number of cards in the game")
 
@@ -36,6 +39,7 @@ def main():
   print(f"Using network seed: {network_seed}, trajectory seed: {trajectory_seed}")
   config = VQ_VAEConfig(
       trajectory_max=args.num_cards - 1,
+      beta_commitment = args.beta_commitment,
       batch_size=args.batch_size,
       afterstate_dimension=args.afterstate_dimension,
       afterstate_representation_hidden_size=args.representation_hidden_layer,

@@ -77,11 +77,11 @@ gamma: float = 1.0 # Discount factor
 
 def get_reference_policy(game_state, legal_actions):
   #TODO: The fixed reference policy goes here, for now uniform
-  #return legal_actions / jnp.sum(legal_actions, axis=-1, keepdims=True)
+  return legal_actions / jnp.sum(legal_actions, axis=-1, keepdims=True)
   #Play the highest legal action available
-  max_actions = jnp.argmax(jnp.cumsum(legal_actions, axis=-1), axis=-1)
-  actions_oh = jax.nn.one_hot(max_actions, num_classes=legal_actions.shape[1], axis=-1)
-  return actions_oh
+  # max_actions = jnp.argmax(jnp.cumsum(legal_actions, axis=-1), axis=-1)
+  # actions_oh = jax.nn.one_hot(max_actions, num_classes=legal_actions.shape[1], axis=-1)
+  # return actions_oh
 
 
 def check_param_difference(p_after, p_before):

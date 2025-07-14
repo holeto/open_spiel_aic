@@ -29,6 +29,8 @@ class VQ_VAEConfig():
   #c_state_vtrace: float = 1.0
   #rho_state_vtrace: float = np.inf
 
+  beta_commitment: float = 0.25
+
   afterstate_dimension: int = 32
 
   afterstate_decoder_hidden_size: int = 64
@@ -79,6 +81,8 @@ class VQ_VAETrainStep(nnx.Module):
     self.policy = Policy_function(config.afterstate_dimension, action_dimension, config.policy_hidden_size, rngs=policy_rngs)
 
     self.optimizer = nnx.Optimizer(self, optimizer)
+
+    self.beta_commitment = config.beta_commitment
 
 
   
@@ -162,12 +166,16 @@ class VQ_VAETrainStep(nnx.Module):
       decoded_states = self.vectorized_decoder(afterstates)
       total_loss += jnp.mean(optax.l2_loss(decoded_states, state_targets[i]) * valid[i])
       total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[i], -1)) * valid[i])
+      #VQ-VAE commitment loss
+      total_loss += self.beta_commitment * jnp.mean(optax.softmax_cross_entropy(policy_logits, jax.lax.stop_gradient(outcomes)) * valid[i])
       #unrolling over the rest of the trajectory now
       for j in range(i + 1, state_targets.shape[0]):
         #only the policy losses here for now
-        afterstates = self.vectorized_get_next_afterstate(afterstates, outcomes)
+        afterstates = self.vectorized_get_next_afterstate(afterstates, outcomes) 
         policy_logits, outcomes = self.vectorized_get_policy(afterstates)
         total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[j], -1)) * valid[j])
+        #VQ-VAE commitment loss
+        total_loss += self.beta_commitment * jnp.mean(optax.softmax_cross_entropy(policy_logits, jax.lax.stop_gradient(outcomes)) * valid[j])
     return total_loss
   
   def loss_function_decode_all_steps(self, state_targets, action_targets, valid):
@@ -182,6 +190,8 @@ class VQ_VAETrainStep(nnx.Module):
       decoded_states = self.vectorized_decoder(afterstates)
       total_loss += jnp.mean(optax.l2_loss(decoded_states, state_targets[i]) * valid[i])
       total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[i], -1)) * valid[i])
+      #VQ-VAE commitment loss
+      total_loss += self.beta_commitment * jnp.mean(optax.softmax_cross_entropy(policy_logits, jax.lax.stop_gradient(outcomes)) * valid[i])
       #unrolling over the rest of the trajectory now
       for j in range(i + 1, state_targets.shape[0]):
         afterstates = self.vectorized_get_next_afterstate(afterstates, outcomes)
@@ -189,9 +199,34 @@ class VQ_VAETrainStep(nnx.Module):
         total_loss += jnp.mean(optax.l2_loss(decoded_states, state_targets[j]) * valid[j])
         policy_logits, outcomes = self.vectorized_get_policy(afterstates)
         total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[j], -1)) * valid[j])
-        #jax.debug.breakpoint()
+        #VQ-VAE commitment loss
+        total_loss += self.beta_commitment * jnp.mean(optax.softmax_cross_entropy(policy_logits, jax.lax.stop_gradient(outcomes)) * valid[j])
     return total_loss
   
+  def loss_function_represent_all_steps(self, state_targets, action_targets, valid):
+     #TODO: After checking that this is correct, try to remove the for loops
+    total_loss = 0
+    for i in range(state_targets.shape[0]):
+      #encode the first state
+      #[Batch, afterstate_dim]
+      afterstates = self.vectorized_get_representation(state_targets[i])
+      #[Batch, actions]
+      policy_logits, outcomes = self.vectorized_get_policy(afterstates)
+      decoded_states = self.vectorized_decoder(afterstates)
+      total_loss += jnp.mean(optax.l2_loss(decoded_states, state_targets[i]) * valid[i])
+      total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[i], -1)) * valid[i])
+      #VQ-VAE commitment loss
+      total_loss += self.beta_commitment * jnp.mean(optax.softmax_cross_entropy(policy_logits, jax.lax.stop_gradient(outcomes)) * valid[i])
+      #unrolling over the rest of the trajectory now
+      for j in range(i + 1, state_targets.shape[0]):
+        afterstates = self.vectorized_get_next_afterstate(afterstates, outcomes)
+        repr_afterstates = self.vectorized_get_representation(state_targets[j])
+        total_loss += jnp.mean(optax.l2_loss(afterstates, repr_afterstates) * valid[j])
+        policy_logits, outcomes = self.vectorized_get_policy(afterstates)
+        total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[j], -1)) * valid[j])
+        #VQ-VAE commitment loss
+        total_loss += self.beta_commitment * jnp.mean(optax.softmax_cross_entropy(policy_logits, jax.lax.stop_gradient(outcomes)) * valid[j])
+    return total_loss
 
   @nnx.jit   
   #This should be compiled only once!!!
@@ -228,6 +263,8 @@ class VQ_VAETrain:
     # a stateful object inheriting from nnx.Module
     self.networks = VQ_VAETrainStep(config,self.action_dimension, self.state_dimension, self.optim)
 
+    self.steps = 0
+
     self.get_example_timestep()
     self.prepare_checkpointer(save_each, print_each, model_save_dir)
 
@@ -242,7 +279,7 @@ class VQ_VAETrain:
       )
     self.print_each = print_each
     self.checkpoint_manager = ocp.CheckpointManager(model_save_dir,
-                                                    item_names = ("network_state", "config"),
+                                                    item_names = ("network_state", "config", "gameplay_key"),
                                                     options=options)
 
   def get_example_timestep(self):
@@ -259,7 +296,7 @@ class VQ_VAETrain:
     self.gameplay_key, temp_key = jax.random.split(self.gameplay_key)
     return temp_key
 
-  def training_step(self, step):
+  def training_step(self):
     trajectory_key = self.get_next_gameplay_key()
     trajectory_key = jax.random.split(trajectory_key, self.config.batch_size)
     sample_trajectories = jax.vmap(self.sample_trajectory, in_axes=(0), out_axes=(1))
@@ -268,20 +305,20 @@ class VQ_VAETrain:
     #params_pre_update = nnx.variables(self.networks, nnx.Param).to_pure_dict()
     #just to ensure shape consistency with the classic batch
     step_loss = self.networks.optimize_step(batch_timestep.state, batch_timestep.action, batch_timestep.valid)
-    #jax.debug.breakpoint()
     #params_post_update = nnx.variables(self.networks, nnx.Param).to_pure_dict()
     #check_param_difference(params_post_update, params_pre_update)
-    #jax.debug.breakpoint()
     return step_loss
 
   def train_model(self, num_steps):
     for s in range(num_steps):
-      step_loss = self.training_step(s)
-      self.checkpoint_manager.save(s, args = ocp.args.Composite(
+      step_loss = self.training_step()
+      self.checkpoint_manager.save(self.steps, args = ocp.args.Composite(
                                                         network_state = ocp.args.StandardSave(nnx.split(self.networks)[1].to_pure_dict()),
-                                                        config = ocp.args.StandardSave(self.config)))
-      if self.print_each > 0 and s % self.print_each == 0:
-        print(f"Step {s}, loss: {step_loss}")
+                                                        config = ocp.args.StandardSave(self.config),
+                                                        gameplay_key = ocp.args.ArraySave(self.gameplay_key)))
+      self.steps += 1
+      if self.print_each > 0 and self.steps % self.print_each == 0:
+        print(f"Step {self.steps}, loss: {step_loss}")
       self.checkpoint_manager.wait_until_finished()
     
   def restore_latest_checkpoint(self, step: int=-1):
@@ -296,11 +333,16 @@ class VQ_VAETrain:
     restore_args = ocp.args.Composite(
                         #Restores as a general PyTree
                         network_state=ocp.args.StandardRestore(None),
-                        config = ocp.args.StandardRestore(self.config))
+                        config = ocp.args.StandardRestore(self.config),
+                        gameplay_key = ocp.args.ArrayRestore(self.gameplay_key))
     restore_step = step if step > -1 else latest_step
     print(f"Restoring model step {restore_step}")
     restored_items = self.checkpoint_manager.restore(restore_step, args=restore_args)
     self.config = restored_items["config"]
+    #Also need to restore the last PRNG key that was used, 
+    # to ensure that the trajectory sampling will not produce
+    # identical data again
+    self.gameplay_key = restored_items["gameplay_key"]
     #The action dimension and state dimension depend only on the game
     # so these should not be trouble. The optim potentially could be, 
     # but as long as optimizer type is not different than the saved state it should be fine
@@ -309,6 +351,8 @@ class VQ_VAETrain:
     saved_state = restored_items["network_state"]
     current_state.replace_by_pure_dict(saved_state)
     self.networks = nnx.merge(graphdef, current_state)
+    #Remember where the training ended
+    self.steps = restore_step
 
   @partial(jax.jit, static_argnums=0)
   def sample_trajectory(self, key) ->TimeStep:
