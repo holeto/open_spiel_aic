@@ -12,6 +12,7 @@ parser.add_argument("--representation_hidden_layer", type=int, default=64, help=
 parser.add_argument("--policy_hidden_layer", type=int, default=64, help="Size of the hidden layer in the policy function")
 parser.add_argument("--decoder_hidden_layer", type=int, default = 64, help="Size of the hidden layer in the decoder function")
 parser.add_argument("--dynamics_hidden_layer", type=int, default=64, help="Size of the hidden layer in the dynamics function")
+parser.add_argument("--codebook_hidden_layer", type=int, default=64, help="Size of the hidden layer in the codebook function")
 parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate for the optimizer")
 parser.add_argument("--network_seed", type=int, default=-1, help="Random seed for network initialization")
 parser.add_argument("--trajectory_seed", type=int, default=-1, help="Random seed for trajectory generation")
@@ -46,6 +47,7 @@ def main():
       policy_hidden_size=args.policy_hidden_layer,
       afterstate_decoder_hidden_size=args.decoder_hidden_layer,
       afterstate_dynamics_hidden_size=args.dynamics_hidden_layer,
+      codebook_hidden_size = args.codebook_hidden_layer,
       learning_rate=args.learning_rate,
       networks_seed=network_seed,
       gameplay_seed=trajectory_seed

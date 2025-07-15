@@ -32,7 +32,6 @@ class Afterstate_decoder_function(nnx.Module):
     orig_state = self.linear_out_state(x)
     return orig_state
 
-#  
 class Afterstate_representation_function(nnx.Module):
   """Receive an actual state.
      Return the afterstate  
@@ -55,6 +54,33 @@ class Afterstate_representation_function(nnx.Module):
    x = self.activation(self.linear_mid(x))
    afterstate = self.linear_out_afterstate(x)
    return afterstate
+  
+class Codebook_function(nnx.Module):
+  """Receive an aftestate and return 
+  action_dimension next possible afterstates.
+  These are returned as action_dimension x afterstate_dimension matrix"""
+
+  def __init__(self,
+                action_dimension,
+                afterstate_dimension,
+                hidden_layer_dimension,
+                rngs: nnx.Rngs):
+      
+      self.linear_in = nnx.Linear(afterstate_dimension, hidden_layer_dimension, rngs=rngs)
+      self.linear_mid = nnx.Linear(hidden_layer_dimension, hidden_layer_dimension, rngs=rngs)
+      #Afterstate induced by state
+      self.linear_out_codebook= nnx.Linear(hidden_layer_dimension,action_dimension * afterstate_dimension, rngs=rngs)
+
+      self.activation = nnx.elu
+      self.action_dimension = action_dimension
+      self.afterstate_dimension = afterstate_dimension
+
+  def __call__(self, afterstate):
+   x = self.activation(self.linear_in(afterstate))
+   x = self.activation(self.linear_mid(x))
+   flat_codebook = self.linear_out_codebook(x)
+   codebook = jnp.reshape(flat_codebook, (*flat_codebook.shape[:-1], self.action_dimension, self.afterstate_dimension))
+   return codebook
 
 
 class Policy_function(nnx.Module):
@@ -81,14 +107,14 @@ class Policy_function(nnx.Module):
      x = self.activation(self.linear_mid(x))
      policy_logits = self.linear_out_policy(x)
      #TODO: Verify if this is correct, we want a straight through estimator
-     c = nnx.one_hot(jnp.argmax(policy_logits, axis=-1),self.action_dimension, axis=-1) - jax.lax.stop_gradient(policy_logits) + policy_logits
-     return policy_logits, c
+     #c = nnx.one_hot(jnp.argmax(policy_logits, axis=-1),self.action_dimension, axis=-1) - jax.lax.stop_gradient(policy_logits) + policy_logits
+     return policy_logits
   
 
 class Afterstate_dynamics_function(nnx.Module):
   """
   Receive last afterstate and the 
-  outcome c produced by the encoder
+  one hot encoded action a
   and return next afterstate
   """
   def __init__(self,

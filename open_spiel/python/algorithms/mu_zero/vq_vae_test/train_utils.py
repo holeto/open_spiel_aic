@@ -3,6 +3,7 @@ import pickle
 import chex
 import jax.numpy as jnp
 import jax
+import matplotlib.pyplot as plt
 
 from typing import Any
 
@@ -91,17 +92,38 @@ def check_param_difference(p_after, p_before):
   norm_tree = jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x), diff_tree)
   print(norm_tree)
  
-  def check_state_shapes(x):
-    """Debug method for checking correct shapes of dictionaries
-    with nested arrays, such as the network parameters, or the optimizer state"""
-    def print_shape_or_elem(x):
-      if isinstance(x, jax.Array):
-        s = x.shape
-        print(s)
-      else:
-        print("Found a not jax array")
-        print(x)
-    jax.tree_util.tree_map(lambda x: print_shape_or_elem(x), x)
+def check_state_shapes(x):
+  """Debug method for checking correct shapes of dictionaries
+  with nested arrays, such as the network parameters, or the optimizer state"""
+  def print_shape_or_elem(x):
+    if isinstance(x, jax.Array):
+      s = x.shape
+      print(s)
+    else:
+      print("Found a not jax array")
+      print(x)
+  jax.tree_util.tree_map(lambda x: print_shape_or_elem(x), x)
+
+def oh_to_action(actions_oh):
+  all_actions = np.tile(np.arange(actions_oh.shape[-1]), (*actions_oh.shape[:-1], 1))
+  actions = np.sum(all_actions * actions_oh, axis=-1)
+  return actions
+
+def add_action_frequencies(timestep_oh_actions):
+  num_actions = timestep_oh_actions.shape[-1]
+  timestep_actions = oh_to_action(timestep_oh_actions).astype(int)
+  init_state_frequencies = np.bincount(timestep_actions[0], minlength=num_actions)
+  next_state_frequencies = []
+  for i in range(3):
+    action_mask = timestep_actions[0] == i
+    state_actions = timestep_actions[1][action_mask]
+    state_frequencies = np.bincount(state_actions, minlength=num_actions)
+    next_state_frequencies.append(state_frequencies)
+  all_state_frequencies = [init_state_frequencies] + next_state_frequencies
+  return np.stack(all_state_frequencies, axis=0)
+
+
+
 
   
 def pickle_dump(filename, data):

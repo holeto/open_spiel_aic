@@ -15,7 +15,7 @@ parser.add_argument("--restore_step", type=int, default= -1, help="Which model s
 
 parser.add_argument("--num_cards", type=int, default=3, help="Number of cards for the point card matching game. Make sure this matches the amount of cards of the stored model.")
 
-def check_policies(model: VQ_VAETrain, game: PointCardMatching, eps=1e-3):
+def check_policies(model: VQ_VAETrain, game: PointCardMatching, eps=1e-2):
   """Traverse the real game tree and for each state first 
   represent it as afterstate and then check learned policy for that afterstate
   and compare it with reference"""
@@ -45,13 +45,13 @@ def check_policies(model: VQ_VAETrain, game: PointCardMatching, eps=1e-3):
   init_state, init_legals = game.initialize_structures(dummy_key)
   _traverse_tree(init_state, np.asarray(init_legals))
 
-def check_afterstate_tree(model: VQ_VAETrain, game:PointCardMatching, eps=1e-3):
+def check_afterstate_tree(model: VQ_VAETrain, game:PointCardMatching, eps=1e-2):
   """Traverse the afterstate tree and check against reference policies
   obtained through traversing the original tree as well. Mainly intended to test the dynamics"""
   dummy_key = jax.random.key(0)
   actions = game.num_distinct_actions()
   def _traverse_tree(state, afterstate, legals, depth=0):
-    afterstate_policy_logits, outcome = model.networks._jit_get_policy_outcome(afterstate)
+    afterstate_policy_logits = model.networks._jit_get_policy(afterstate)
     afterstate_policy = jax.nn.softmax(afterstate_policy_logits)
     afterstate_policy = np.asarray(afterstate_policy)
     state_reference_pols = np.asarray(get_reference_policy(state, legals)[0])
@@ -62,12 +62,17 @@ def check_afterstate_tree(model: VQ_VAETrain, game:PointCardMatching, eps=1e-3):
       print(f"Policies differ by more than {eps} in state: {state}")
       print(f"Reference policy: {state_reference_pols}")
       print(f"Learned policy: {afterstate_policy}")
+      state_tensor, _, _, _ = game.get_info(state)
+      represented_afterstate = model.networks._jit_get_representation(state_tensor)
+      print(f"Difference from represented afterstate {np.abs(afterstate - represented_afterstate)}")
+      represented_policy = jax.nn.softmax(model.networks._jit_get_policy(represented_afterstate))
+      print(f"Policy of represented afterstate {represented_policy}")
     for ai, a in enumerate(state_reference_pols):
       if a < eps:
         continue
       next_state, next_legals, next_rewards, terminal = game.apply_action(state, dummy_key, depth, jnp.asarray([ai, 0]))
       outcome = jax.nn.one_hot(ai, actions)
-      next_afterstate = model.networks._jit_get_next_afterstate(afterstate, outcome)
+      next_afterstate = model.networks._jit_get_next_closest_afterstate(afterstate, outcome)
       if terminal:
         continue
       _traverse_tree(next_state, next_afterstate, np.asarray(next_legals), depth + 1)
@@ -81,6 +86,7 @@ def afterstate_walk_test(model:VQ_VAETrain, game:PointCardMatching):
   """Does not check with reference directly, just perform a 
    test of getting afterstate outcomes and print out policies and given outcomes."""
   dummy_key = jax.random.key(0)
+  actions = game.num_distinct_actions()
   state, legals = game.initialize_structures(dummy_key)
   init_state_tensor, _, _, _ = game.get_info(state)
   afterstate = model.networks._jit_get_representation(init_state_tensor)
@@ -88,12 +94,13 @@ def afterstate_walk_test(model:VQ_VAETrain, game:PointCardMatching):
   print(f"Init decoded afterstate: {decoded_afterstate}")
   print(f"Init state tensor: {init_state_tensor}")
   for i in range(model.config.trajectory_max):
-    policy, outcome = model.networks._jit_get_policy_outcome(afterstate)
-    print(f"Policy: {jax.nn.softmax(policy)}")
+    policy = jax.nn.softmax(model.networks._jit_get_policy(afterstate))
+    ai = np.argmax(policy)
+    outcome = jax.nn.one_hot(ai, actions)
+    print(f"Policy: {policy}")
     print(f"Argmax outcome {outcome}")
-    afterstate = model.networks._jit_get_next_afterstate(afterstate, outcome)
+    afterstate = model.networks._jit_get_next_closest_afterstate(afterstate, outcome)
     decoded_afterstate = model.networks._jit_decoder(afterstate)
-    ai = np.argmax(np.cumsum(outcome))
     state, legals, reward, terminal = game.apply_action(state, dummy_key, i, jnp.asarray([ai, 0]))
     #The model is not trained on terminal states
     if terminal:

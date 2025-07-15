@@ -12,8 +12,8 @@ from flax import nnx
 from functools import partial
 
 from open_spiel.python.algorithms.mu_zero.vq_vae_test.point_card_matching import PointCardMatching, PointCardMatchingState
-from open_spiel.python.algorithms.mu_zero.vq_vae_test.vq_vae_networks import Afterstate_representation_function, Afterstate_dynamics_function, Afterstate_decoder_function, Policy_function
-from open_spiel.python.algorithms.mu_zero.vq_vae_test.train_utils import get_reference_policy, check_param_difference
+from open_spiel.python.algorithms.mu_zero.vq_vae_test.vq_vae_networks import Afterstate_representation_function, Afterstate_dynamics_function, Afterstate_decoder_function, Policy_function, Codebook_function
+from open_spiel.python.algorithms.mu_zero.vq_vae_test.train_utils import get_reference_policy
 
 
 
@@ -37,6 +37,7 @@ class VQ_VAEConfig():
   afterstate_representation_hidden_size: int = 64
   policy_hidden_size: int = 64
   afterstate_dynamics_hidden_size: int = 64
+  codebook_hidden_size: int = 64
 
   learning_rate: float = 3e-4
   networks_seed: int = 99
@@ -47,6 +48,9 @@ class TimeStep():
   
   valid: chex.Array = () # [..., 1]
   state: chex.Array = () # [..., state_dim]
+  #TODO: This saves some redundant data and could 
+  # probably be stored better, but we need the terminal state
+  next_state: chex.Array = () # [..., state_dim]
   legal: chex.Array = () # [..., Player, A]
   
   action: chex.Array = () # [..., Player, A]
@@ -79,6 +83,9 @@ class VQ_VAETrainStep(nnx.Module):
     self.afterstate_representation = Afterstate_representation_function(state_dimension, config.afterstate_dimension, config.afterstate_representation_hidden_size, rngs=representation_rngs)
     networks_key, policy_rngs = self.get_next_network_rngs(networks_key)
     self.policy = Policy_function(config.afterstate_dimension, action_dimension, config.policy_hidden_size, rngs=policy_rngs)
+    networks_key, codebook_rngs = self.get_next_network_rngs(networks_key)
+    self.codebook = Codebook_function(action_dimension, config.afterstate_dimension, config.codebook_hidden_size, codebook_rngs)
+
 
     self.optimizer = nnx.Optimizer(self, optimizer)
 
@@ -98,12 +105,30 @@ class VQ_VAETrainStep(nnx.Module):
     state = self.afterstate_decoder(afterstate)
     return state
   
-  def get_policy_outcome(self, afterstate):
-    policy_logits, outcome = self.policy(afterstate)
-    return policy_logits, outcome
+  def get_next_closest_afterstate(self, afterstate, action):
+    """Apply dynamics step to get the next encoded afterstate
+    and then pick its closest representative from the learned codebook and return it."""
+    next_code = self.get_next_afterstate(afterstate, action)
+    codebook = self.get_codebook(afterstate)
+    closest_index = jnp.argmin((jnp.sum((next_code[None, :] - codebook) **2, axis=-1)), axis=-1)
+    #[action_dim, afterstate_dim]
+    closest_index_oh = nnx.one_hot(closest_index, codebook.shape[-2], axis=-1)
+    #[afterstate_dim]
+    closest_representative = jnp.sum(codebook * closest_index_oh[..., None], axis=-2)
+    return closest_representative
+    
   
-  def get_next_afterstate(self, afterstate, outcome):
-    next_afterstate = self.afterstate_dynamics(afterstate, outcome)
+  def get_codebook(self, aftestate):
+    """Returns a codebook of next possible afterstates
+    of shape (action_dimension, afterstate_dimension)"""
+    return self.codebook(aftestate)
+
+  def get_policy(self, afterstate):
+    policy_logits  = self.policy(afterstate)
+    return policy_logits
+  
+  def get_next_afterstate(self, afterstate, action):
+    next_afterstate = self.afterstate_dynamics(afterstate, action)
     return next_afterstate
   
   @nnx.jit
@@ -115,12 +140,19 @@ class VQ_VAETrainStep(nnx.Module):
     return self.decoder(afterstate)
   
   @nnx.jit
-  def _jit_get_policy_outcome(self, afterstate):
-    return self.get_policy_outcome(afterstate)
+  def _jit_get_policy(self, afterstate):
+    return self.get_policy(afterstate)
   
   @nnx.jit
-  def _jit_get_next_afterstate(self, afterstate, outcome):
-    return self.get_next_afterstate(afterstate, outcome)
+  def _jit_get_next_afterstate(self, afterstate, action):
+    return self.get_next_afterstate(afterstate, action)
+  
+  @nnx.jit
+  def _jit_get_codebook(self, afterstate):
+    return self.get_codebook(afterstate)
+  @nnx.jit
+  def _jit_get_next_closest_afterstate(self, afterstate, action):
+    return self.get_next_closest_afterstate(afterstate, action)
   
   #FOR PROCESSING BATCHES:
   @nnx.jit
@@ -136,107 +168,81 @@ class VQ_VAETrainStep(nnx.Module):
   @nnx.jit
   @nnx.vmap(in_axes=(None, 0))
   def vectorized_get_policy(self, afterstate):
-    return self.get_policy_outcome(afterstate)
+    return self.get_policy(afterstate)
   
   @nnx.jit
   @nnx.vmap(in_axes=(None, 0, 0))
-  def vectorized_get_next_afterstate(self, afterstate, outcome):
-    return self.get_next_afterstate(afterstate, outcome)
-
+  def vectorized_get_next_afterstate(self, afterstate, action):
+    return self.get_next_afterstate(afterstate, action)
+  
+  @nnx.jit
+  @nnx.vmap(in_axes=(None, 0))
+  def vectorized_get_codebook(self, afterstate):
+    return self.get_codebook(afterstate)
   
   def get_policy_from_real(self, state):
     """Returns a learned policy for real state. 
     Calls both the representation and policy networks.
     Used for inference."""
     afterstate = self._jit_get_representation(state)
-    policy_logits, outcome = self._jit_get_policy_outcome(afterstate)
+    policy_logits = self._jit_get_policy(afterstate)
     return nnx.softmax(policy_logits)
   
-  def loss_function_decode_first_step(self, state_targets, action_targets, valid):
-    #Trajectory, Batch, ...] is the shape of the 
-    # state and action targets
-    #TODO: After checking that this is correct, try to remove the for loops
-    total_loss = 0
-    for i in range(state_targets.shape[0]):
+  def loss_function(self, timestep:TimeStep):
+    l_a, l_c, l_s, l_z = 0, 0, 0, 0
+    for i in range(timestep.state.shape[0]):
       #encode the first state
       #[Batch, afterstate_dim]
-      afterstates = self.vectorized_get_representation(state_targets[i])
+      afterstates = self.vectorized_get_representation(timestep.state[i])
       #[Batch, actions]
-      policy_logits, outcomes = self.vectorized_get_policy(afterstates)
-      decoded_states = self.vectorized_decoder(afterstates)
-      total_loss += jnp.mean(optax.l2_loss(decoded_states, state_targets[i]) * valid[i])
-      total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[i], -1)) * valid[i])
-      #VQ-VAE commitment loss
-      total_loss += self.beta_commitment * jnp.mean(optax.softmax_cross_entropy(policy_logits, jax.lax.stop_gradient(outcomes)) * valid[i])
-      #unrolling over the rest of the trajectory now
-      for j in range(i + 1, state_targets.shape[0]):
-        #only the policy losses here for now
-        afterstates = self.vectorized_get_next_afterstate(afterstates, outcomes) 
-        policy_logits, outcomes = self.vectorized_get_policy(afterstates)
-        total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[j], -1)) * valid[j])
-        #VQ-VAE commitment loss
-        total_loss += self.beta_commitment * jnp.mean(optax.softmax_cross_entropy(policy_logits, jax.lax.stop_gradient(outcomes)) * valid[j])
-    return total_loss
+      policy_logits = self.vectorized_get_policy(afterstates)
+      #policy = nnx.softmax(policy_logits, axis=-1)
+      smoothed_actions = jnp.where(timestep.action[i] == 1, 0.95, 0.05)
+      #Policy loss
+      l_a += jnp.mean(optax.softmax_cross_entropy(policy_logits, smoothed_actions) * timestep.valid[i])
+      #l_a += jnp.mean(optax.l2_loss(policy, smoothed_actions))
+      #[Batch, afterstate_dim]
+      # This is the output of encoder for our purposes
+      next_afterstates = self.vectorized_get_next_afterstate(afterstates, timestep.action[i])      
+      #[Batch, action_dim, afterstate_dim]
+      codebooks = self.vectorized_get_codebook(afterstates)
+      #[Batch, 1, afterstate_dim]
+      closest_index = jnp.argmin((jnp.sum((next_afterstates[:, None, :] - codebooks) **2, axis=-1)), axis=-1)
+      #[Batch, action_dim, afterstate_dim]
+      closest_index_oh = nnx.one_hot(closest_index, codebooks.shape[-2], axis=-1)
+      #[Batch, afterstate_dim]
+      closest_representatives = jnp.sum(codebooks * closest_index_oh[..., None], axis=-2)
+      #VQ-VAE losses
+      #Embedding closeness
+      l_c += jnp.mean(optax.l2_loss(closest_representatives, jax.lax.stop_gradient(next_afterstates)) * timestep.valid[i])
+      #Commitment loss
+      l_c += self.beta_commitment * jnp.mean(optax.l2_loss(next_afterstates, jax.lax.stop_gradient(closest_representatives)) * timestep.valid[i])  
+      #Applying a straight through estimator to closest_representatives to flow back to next_afterstates
+      # necessary to get the gradients to flow back to the dynamics network
+      closest_representatives = closest_representatives + next_afterstates - jax.lax.stop_gradient(next_afterstates) 
+      #[Batch, state_dim]
+      decoded_states = self.vectorized_decoder(closest_representatives)
+      # Reconstruction loss. It is made towards the NEXT state, since
+      # the dynamics are our encoder
+      l_s += jnp.mean(optax.l2_loss(decoded_states, timestep.next_state[i]) * timestep.valid[i])
+      #[Batch, afterstate_dim]
+      #TODO: Representation is called here twice on the same inputs
+      next_representations = self.vectorized_get_representation(timestep.next_state[i])
+      #Distance between representation and dynamics output.
+      # Representation is frozen with stop_gradient for this operation
+      l_z += jnp.mean(optax.l2_loss(closest_representatives, jax.lax.stop_gradient(next_representations)) * timestep.valid[i])
+    return l_a + l_c + l_s + l_z
   
-  def loss_function_decode_all_steps(self, state_targets, action_targets, valid):
-    #TODO: After checking that this is correct, try to remove the for loops
-    total_loss = 0
-    for i in range(state_targets.shape[0]):
-      #encode the first state
-      #[Batch, afterstate_dim]
-      afterstates = self.vectorized_get_representation(state_targets[i])
-      #[Batch, actions]
-      policy_logits, outcomes = self.vectorized_get_policy(afterstates)
-      decoded_states = self.vectorized_decoder(afterstates)
-      total_loss += jnp.mean(optax.l2_loss(decoded_states, state_targets[i]) * valid[i])
-      total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[i], -1)) * valid[i])
-      #VQ-VAE commitment loss
-      total_loss += self.beta_commitment * jnp.mean(optax.softmax_cross_entropy(policy_logits, jax.lax.stop_gradient(outcomes)) * valid[i])
-      #unrolling over the rest of the trajectory now
-      for j in range(i + 1, state_targets.shape[0]):
-        afterstates = self.vectorized_get_next_afterstate(afterstates, outcomes)
-        decoded_states = self.vectorized_decoder(afterstates)
-        total_loss += jnp.mean(optax.l2_loss(decoded_states, state_targets[j]) * valid[j])
-        policy_logits, outcomes = self.vectorized_get_policy(afterstates)
-        total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[j], -1)) * valid[j])
-        #VQ-VAE commitment loss
-        total_loss += self.beta_commitment * jnp.mean(optax.softmax_cross_entropy(policy_logits, jax.lax.stop_gradient(outcomes)) * valid[j])
-    return total_loss
-  
-  def loss_function_represent_all_steps(self, state_targets, action_targets, valid):
-     #TODO: After checking that this is correct, try to remove the for loops
-    total_loss = 0
-    for i in range(state_targets.shape[0]):
-      #encode the first state
-      #[Batch, afterstate_dim]
-      afterstates = self.vectorized_get_representation(state_targets[i])
-      #[Batch, actions]
-      policy_logits, outcomes = self.vectorized_get_policy(afterstates)
-      decoded_states = self.vectorized_decoder(afterstates)
-      total_loss += jnp.mean(optax.l2_loss(decoded_states, state_targets[i]) * valid[i])
-      total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[i], -1)) * valid[i])
-      #VQ-VAE commitment loss
-      total_loss += self.beta_commitment * jnp.mean(optax.softmax_cross_entropy(policy_logits, jax.lax.stop_gradient(outcomes)) * valid[i])
-      #unrolling over the rest of the trajectory now
-      for j in range(i + 1, state_targets.shape[0]):
-        afterstates = self.vectorized_get_next_afterstate(afterstates, outcomes)
-        repr_afterstates = self.vectorized_get_representation(state_targets[j])
-        total_loss += jnp.mean(optax.l2_loss(afterstates, repr_afterstates) * valid[j])
-        policy_logits, outcomes = self.vectorized_get_policy(afterstates)
-        total_loss += jnp.mean(optax.softmax_cross_entropy_with_integer_labels(policy_logits, jnp.squeeze(action_targets[j], -1)) * valid[j])
-        #VQ-VAE commitment loss
-        total_loss += self.beta_commitment * jnp.mean(optax.softmax_cross_entropy(policy_logits, jax.lax.stop_gradient(outcomes)) * valid[j])
-    return total_loss
 
   @nnx.jit   
   #This should be compiled only once!!!
   @chex.assert_max_traces(n=1)
-  def optimize_step(self,state_targets, action_targets, valid):
+  def optimize_step(self,timestep: TimeStep):
     """Function performing the actual step, where 
     we call the loss_function, derivate it with respect to self (a.k.a the params
     stored in self), and then call self.optimizer update."""
     def loss_fn(current_train_state):
-      return current_train_state.loss_function_decode_first_step(state_targets, action_targets, valid)
+      return current_train_state.loss_function(timestep)
     
     total_loss, all_grads = nnx.value_and_grad(loss_fn)(self)
     self.optimizer.update(all_grads)
@@ -295,6 +301,7 @@ class VQ_VAETrain:
   def get_next_gameplay_key(self):
     self.gameplay_key, temp_key = jax.random.split(self.gameplay_key)
     return temp_key
+  
 
   def training_step(self):
     trajectory_key = self.get_next_gameplay_key()
@@ -302,11 +309,7 @@ class VQ_VAETrain:
     sample_trajectories = jax.vmap(self.sample_trajectory, in_axes=(0), out_axes=(1))
     #[Trajectory, Batch, ...]
     batch_timestep = sample_trajectories(trajectory_key)
-    #params_pre_update = nnx.variables(self.networks, nnx.Param).to_pure_dict()
-    #just to ensure shape consistency with the classic batch
-    step_loss = self.networks.optimize_step(batch_timestep.state, batch_timestep.action, batch_timestep.valid)
-    #params_post_update = nnx.variables(self.networks, nnx.Param).to_pure_dict()
-    #check_param_difference(params_post_update, params_pre_update)
+    step_loss = self.networks.optimize_step(batch_timestep)
     return step_loss
 
   def train_model(self, num_steps):
@@ -316,9 +319,9 @@ class VQ_VAETrain:
                                                         network_state = ocp.args.StandardSave(nnx.split(self.networks)[1].to_pure_dict()),
                                                         config = ocp.args.StandardSave(self.config),
                                                         gameplay_key = ocp.args.ArraySave(self.gameplay_key)))
-      self.steps += 1
       if self.print_each > 0 and self.steps % self.print_each == 0:
         print(f"Step {self.steps}, loss: {step_loss}")
+      self.steps += 1
       self.checkpoint_manager.wait_until_finished()
     
   def restore_latest_checkpoint(self, step: int=-1):
@@ -372,8 +375,8 @@ class VQ_VAETrain:
     @jax.jit
     def choice_wrapper(key, p):
       action = jax.random.choice(key, actions, p=p)
-      #action_oh = jax.nn.one_hot(action, actions)
-      return action#, action_oh
+      action_oh = jax.nn.one_hot(action, actions)
+      return action, action_oh
     
     vectorized_sample_action = jax.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0)
     
@@ -393,11 +396,12 @@ class VQ_VAETrain:
       # For each player samples a single action
       sample_key = jax.random.split(sample_key, 2)
       
-      action = vectorized_sample_action(sample_key, pi)
+      action, action_oh = vectorized_sample_action(sample_key, pi)
       next_game_state, next_legal, next_rewards, terminal= self.game.apply_action(carry.game_state, action_key, turn, action)
       valid = (jnp.ones_like(next_rewards, dtype=int) - carry.terminal).astype(bool)
       terminal = jnp.logical_or(terminal, carry.terminal)
       next_rewards = jnp.where(valid, next_rewards, jnp.zeros_like(next_rewards))
+      next_state, _, _, _ = self.game.get_info(next_game_state)
       new_carry = SampleTrajectoryCarry(
         game_state = next_game_state,
         terminal = terminal,
@@ -407,12 +411,14 @@ class VQ_VAETrain:
         valid = valid,
         state = state,
         legal = carry.legal_actions,
+        next_state = next_state,
         #Only interested in player 1 actions here
-        action = action[0][None],
+        action = action_oh[0],
       )
       return new_carry, timestep
     _, timestep = jax.lax.scan(_sample_trajectory,
              init=init_carry,
+             #trajectory_max + 1, since we also need the terminal state
              xs=(trajectory_key, jnp.arange(self.config.trajectory_max)))
     #[Trajectory, ...]
     return timestep
