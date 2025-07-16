@@ -39,7 +39,7 @@ def main():
     trajectory_seed = np.random.randint(0, 2**32 - 1)
   print(f"Using network seed: {network_seed}, trajectory seed: {trajectory_seed}")
   config = VQ_VAEConfig(
-      trajectory_max=args.num_cards - 1,
+      trajectory_max=args.num_cards,
       beta_commitment = args.beta_commitment,
       batch_size=args.batch_size,
       afterstate_dimension=args.afterstate_dimension,

@@ -122,6 +122,25 @@ def add_action_frequencies(timestep_oh_actions):
   all_state_frequencies = [init_state_frequencies] + next_state_frequencies
   return np.stack(all_state_frequencies, axis=0)
 
+def plot_param_devs(param_devs, iters, filepath = "param_devs/"):
+  #concatenate all the iterations into a single pytree
+  all_iter_devs = jax.tree_util.tree_map(lambda *x: jnp.stack(x, axis=0), *param_devs)
+  #param_devs should be a single pure dict now
+  #Top level keys should be the network names 
+  for net, net_items in all_iter_devs.items():
+    net_filename = f"{filepath}std_dev_{net}.pdf"
+    plt.figure()
+    plt.xlabel("Iterations")
+    plt.ylabel("Normalized std-dev")
+    for layer, param_devs in net_items.items():
+      for param_name, val in param_devs.items():
+        #skip biases
+        if "bias" in param_name:
+          continue
+        plt.plot(iters, val, label=f"{layer}_{param_name}")
+    plt.legend()
+    plt.savefig(net_filename)
+    plt.close()
 
 
 
